@@ -1,3 +1,6 @@
+#claude
+.claude/settings.json
+
 # Logs
 logs
 *.log

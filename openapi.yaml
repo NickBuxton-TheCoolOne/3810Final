@@ -1,0 +1,99 @@
+# openapi.yaml — Authoritative REST Specification
+#
+# STATUS: STUB — contract skeleton only.
+# Per AGENTS.md §1 every HTTP endpoint, request body, status code and response
+# payload must be declared here, and Fastify's native JSON Schema validation must
+# align with this file. No endpoints are specified yet because SPEC.md has no
+# requirements. Do NOT add a path here that has no acceptance criterion in SPEC.md.
+#
+# Order of work: SPEC.md -> this file -> js/api/ routes -> js/TestingScripts/ tests.
+
+openapi: 3.0.3
+
+info:
+  title: 3810Final Live Bidding Arena API
+  version: 0.0.0
+  description: >
+    Multi-tenant live bidding competition game. Stub specification — the paths
+    object is intentionally empty until SPEC.md defines the feature set.
+    Placeholders below are the shapes the architecture guarantees, marked TODO.
+
+servers:
+  - url: http://localhost:3000
+    description: Local development
+
+tags:
+  - name: matches
+    description: Match lifecycle and the drift-free polling state endpoint
+  - name: bidding
+    description: 7-second round bid submission
+  - name: auth
+    description: Session and RBAC
+
+paths:
+  # The one endpoint named by AGENTS.md §2. It is declared here so the contract
+  # exists, with the response schema left as TODO rather than invented.
+  /api/matches/{matchId}/state:
+    get:
+      tags: [matches]
+      operationId: getMatchState
+      summary: Poll current match state for live client updates
+      description: >
+        TODO — implement once SPEC.md defines round and match semantics.
+        Contract locked by AGENTS.md §2: clients poll this every 300-500 ms and the
+        response MUST carry a server UTC `roundEndsAt` timestamp so the client can
+        compute remaining time locally and stay drift-free.
+      parameters:
+        - name: matchId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: TODO — current match, round and scoreboard state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MatchState'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+components:
+  schemas:
+    MatchState:
+      type: object
+      description: TODO — placeholder. Only `roundEndsAt` is required by AGENTS.md.
+      required:
+        - roundEndsAt
+      properties:
+        roundEndsAt:
+          type: string
+          format: date-time
+          description: Server UTC instant the current 7-second round ends.
+
+    Error:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+        statusCode:
+          type: integer
+
+  responses:
+    Unauthorized:
+      description: Authentication required or session expired.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: The resource does not exist.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
