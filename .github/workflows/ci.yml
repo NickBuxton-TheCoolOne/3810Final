@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel an older run on the same branch when a newer commit is pushed.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      NODE_ENV: test
+      ROUND_DURATION_MS: 7000
+      CLIENT_POLL_INTERVAL_MS: 400
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm            # needs package-lock.json committed
+
+      - name: Install dependencies
+        run: npm ci             # exact versions from package-lock.json
+
+      - name: Syntax-check all JS
+        run: find js workers -name '*.js' -print0 | xargs -0 -r -n1 node --check
+
+      - name: Run tests
+        run: npm test -- --ci --passWithNoTests
