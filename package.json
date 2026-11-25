@@ -6,14 +6,14 @@
   "main": "js/server.js",
   "type": "commonjs",
   "engines": {
-    "node": ">=22"
+    "node": ">=24.9"
   },
   "scripts": {
     "start": "node js/server.js",
     "dev": "node --watch js/server.js",
     "worker": "echo \"TODO: no workers/ scripts yet — add one per BullMQ queue\" && exit 1",
-    "test": "jest --runInBand",
-    "test:contract": "jest --runInBand --testPathPatterns=openapi"
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand",
+    "test:contract": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --testPathPatterns=openapi"
   },
   "dependencies": {
     "@fastify/static": "^10.1.12",
