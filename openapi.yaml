@@ -1,98 +1,978 @@
 # openapi.yaml — Authoritative REST Specification
 #
-# STATUS: STUB — contract skeleton only.
+# STATUS: DRAFT v0.1 — every endpoint named in SPEC.md §6 is declared here.
 # Per AGENTS.md §1 every HTTP endpoint, request body, status code and response
 # payload must be declared here, and Fastify's native JSON Schema validation must
-# align with this file. No endpoints are specified yet because SPEC.md has no
-# requirements. Do NOT add a path here that has no acceptance criterion in SPEC.md.
+# align with this file. Do NOT add a path here that has no acceptance criterion in
+# SPEC.md. Each operation's description names the ACs it serves.
 #
 # Order of work: SPEC.md -> this file -> js/api/ routes -> js/TestingScripts/ tests.
+#
+# Conventions
+#   - JSON properties are camelCase (AGENTS.md §2).
+#   - IDs are UUID strings (SQL Server `uniqueidentifier`).
+#   - Timestamps are UTC ISO-8601 strings from the server clock.
+#   - Auth: `Authorization: Bearer <token>`. Players get a match-scoped token from
+#     POST /api/matches/join; Hosts and Admins get one from POST /api/auth/login.
+#   - Errors use Fastify's error shape plus an app-specific `code` (see Error).
+#   - Rejected bids: 422 = the amount is invalid, 409 = the item or match is in the
+#     wrong state (AC-2, AC-3).
+#   - Cross-tenant access (a token for match A on match B) returns 404, so match
+#     IDs can't be probed (AC-16).
 
 openapi: 3.0.3
 
 info:
   title: 3810Final Live Bidding Arena API
-  version: 0.0.0
+  version: 0.1.0
   description: >
-    Multi-tenant live bidding competition game. Stub specification — the paths
-    object is intentionally empty until SPEC.md defines the feature set.
-    Placeholders below are the shapes the architecture guarantees, marked TODO.
+    Multi-tenant live bidding competition game. Players join a match with a
+    nickname and join code, then place sealed, cumulative, all-pay bids on items
+    in 7-second rounds. See SPEC.md for the rules this contract serves.
 
 servers:
   - url: http://localhost:3000
     description: Local development
 
 tags:
-  - name: matches
-    description: Match lifecycle and the drift-free polling state endpoint
-  - name: bidding
-    description: 7-second round bid submission
+  - name: ops
+    description: Infrastructure checks
   - name: auth
-    description: Session and RBAC
+    description: Staff (Host / Admin) login
+  - name: matches
+    description: Match lifecycle, polling state and results
+  - name: bidding
+    description: Sealed bid submission during a round
+  - name: leaderboard
+    description: All-time per-match results
+  - name: admin
+    description: Host account management (Admin only)
+
+security:
+  - bearerAuth: []
 
 paths:
-  # The one endpoint named by AGENTS.md §2. It is declared here so the contract
-  # exists, with the response schema left as TODO rather than invented.
+  /healthz:
+    get:
+      tags: [ops]
+      operationId: getHealth
+      summary: Liveness check
+      description: Unauthenticated. Returns 200 while the process is serving requests.
+      security: []
+      responses:
+        '200':
+          description: The server is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+
+  /api/auth/login:
+    post:
+      tags: [auth]
+      operationId: login
+      summary: Staff login (Host or Admin)
+      description: >
+        AC-17. Returns a session token for an active staff account. Wrong
+        credentials and disabled accounts both return 401 with the same body, so
+        the response does not reveal which accounts exist.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Logged in.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/matches:
+    post:
+      tags: [matches]
+      operationId: createMatch
+      summary: Create a match (Host or Admin)
+      description: >
+        AC-13. Creates a match in `lobby` status owned by the caller and returns a
+        join code that is unique among open matches. Omitted settings take the
+        SPEC.md defaults. Player tokens get 403.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateMatchRequest'
+      responses:
+        '201':
+          description: Match created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Match'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/matches/join:
+    post:
+      tags: [matches]
+      operationId: joinMatch
+      summary: Join a match with a join code and nickname
+      description: >
+        AC-11. No auth. Returns a player token scoped to this one match. Nicknames
+        are compared case-insensitively within the match; the same nickname may
+        be used in other matches.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JoinMatchRequest'
+      responses:
+        '201':
+          description: Joined.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JoinMatchResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: No open match has this join code (`code` = `JOIN_CODE_NOT_FOUND`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: >
+            Cannot join. `code` is `NICKNAME_TAKEN`, `MATCH_FULL` or
+            `MATCH_NOT_IN_LOBBY`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/matches/{matchId}/start:
+    post:
+      tags: [matches]
+      operationId: startMatch
+      summary: Start a match (owning Host or Admin)
+      description: >
+        AC-13. Moves the match from `lobby` to `running`, sets `startedAt` and
+        `endsAt`, spawns round 1's item and schedules round resolution. Requires
+        at least 2 players. Players and non-owning Hosts get 403.
+      parameters:
+        - $ref: '#/components/parameters/matchId'
+      responses:
+        '200':
+          description: Match started.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Match'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: >
+            `code` is `NOT_ENOUGH_PLAYERS` or `MATCH_NOT_IN_LOBBY`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/matches/{matchId}/end:
+    post:
+      tags: [matches]
+      operationId: endMatch
+      summary: End a running match early (owning Host or Admin)
+      description: >
+        AC-15. Runs final resolution (SPEC.md §1.1 step 6): open items resolve as
+        if their countdown ended, the scoreboard is saved and leaderboard entries
+        are written. Admins may end any match; Hosts only their own. Players get 403.
+      parameters:
+        - $ref: '#/components/parameters/matchId'
+      responses:
+        '200':
+          description: Match ended; status is `finished`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Match'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The match is not running (`code` = `MATCH_NOT_RUNNING`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /api/matches/{matchId}/state:
     get:
       tags: [matches]
       operationId: getMatchState
       summary: Poll current match state for live client updates
       description: >
-        TODO — implement once SPEC.md defines round and match semantics.
-        Contract locked by AGENTS.md §2: clients poll this every 300-500 ms and the
-        response MUST carry a server UTC `roundEndsAt` timestamp so the client can
-        compute remaining time locally and stay drift-free.
+        AC-1b, AC-4 to AC-10, AC-12. Clients poll every 300–500 ms (AGENTS.md §2).
+        Countdowns are computed client-side from `roundEndsAt` / `matchEndsAt` and
+        `serverTime`, so they don't drift. Sealed bids (AC-4): the response never
+        contains another player's running total or current-round bids, and other
+        players' coin balances are not shown. A player sees their own totals in
+        `myTotal`. Readable by players of this match, its owning Host, and Admins.
       parameters:
-        - name: matchId
-          in: path
-          required: true
-          schema:
-            type: string
+        - $ref: '#/components/parameters/matchId'
       responses:
         '200':
-          description: TODO — current match, round and scoreboard state.
+          description: Current match state.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/MatchState'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/matches/{matchId}/items/{itemId}/bids:
+    post:
+      tags: [bidding]
+      operationId: placeBid
+      summary: Place a sealed bid on an open item (Player only)
+      description: >
+        AC-1, AC-1b, AC-2, AC-3, AC-8b, AC-8c. `amount` is added to the player's
+        running total on the item and charged at once (all-pay, never refunded).
+        Accepted only if `amount` >= 1, `amount` <= the player's coins, and
+        (previous total + `amount`) > the item's `currentBid`. Rejected bids are
+        not stored and charge nothing. Hosts and Admins get 403.
+      parameters:
+        - $ref: '#/components/parameters/matchId'
+        - $ref: '#/components/parameters/itemId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlaceBidRequest'
+      responses:
+        '201':
+          description: Bid accepted and charged.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaceBidResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: >
+            The item or match is in the wrong state. `code` is `ITEM_CLOSED`,
+            `MATCH_NOT_RUNNING` or `ALREADY_BID_THIS_ROUND`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: >
+            The amount is invalid. `code` is `INSUFFICIENT_COINS` or
+            `TOTAL_NOT_ABOVE_CURRENT_BID`. (Amounts below 1 or non-integers fail
+            schema validation with 400.)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/matches/{matchId}/results:
+    get:
+      tags: [matches]
+      operationId: getMatchResults
+      summary: Final scoreboard and per-round score history
+      description: >
+        AC-14, AC-18, AC-19, AC-20. Available once the match is `finished`.
+        Readable by players of this match, its owning Host, and Admins.
+      parameters:
+        - $ref: '#/components/parameters/matchId'
+      responses:
+        '200':
+          description: Final results.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MatchResults'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The match has not finished (`code` = `MATCH_NOT_FINISHED`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/leaderboard:
+    get:
+      tags: [leaderboard]
+      operationId: getLeaderboard
+      summary: All-time leaderboard of per-match results
+      description: >
+        AC-14. One entry per player per finished match, sorted by `score`
+        descending, then `finishedAt` ascending. Nicknames are not merged across
+        matches. Any valid token (Player, Host or Admin) may read it.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: A page of leaderboard entries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Leaderboard'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/admin/hosts:
+    post:
+      tags: [admin]
+      operationId: createHost
+      summary: Create a Host account (Admin only)
+      description: >
+        AC-21. Always creates role `host`; the request has no role field and
+        extra properties are rejected, so no endpoint can create an Admin
+        (AC-17). Hosts and Players get 403.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateHostRequest'
+      responses:
+        '201':
+          description: Host created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StaffAccount'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Username already exists (`code` = `USERNAME_TAKEN`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/admin/hosts/{hostId}/disable:
+    post:
+      tags: [admin]
+      operationId: disableHost
+      summary: Disable a Host account (Admin only)
+      description: >
+        AC-21. Sets `isActive` to false; the account can no longer log in and its
+        existing tokens stop working. Admin accounts cannot be disabled here
+        (404). Idempotent. Hosts and Players get 403.
+      parameters:
+        - name: hostId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Host disabled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StaffAccount'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
 
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        Player tokens (from join) are scoped to one match. Staff tokens (from
+        login) carry role `host` or `admin`.
+
+  parameters:
+    matchId:
+      name: matchId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    itemId:
+      name: itemId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
   schemas:
+    # ---------- Requests ----------
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 50
+        password:
+          type: string
+          minLength: 1
+          maxLength: 200
+
+    CreateMatchRequest:
+      type: object
+      additionalProperties: false
+      description: All fields optional; omitted ones use the SPEC.md defaults.
+      properties:
+        durationSeconds:
+          type: integer
+          minimum: 7
+          maximum: 1800
+          default: 180
+          description: Match length. Rounds are 7 s, so total rounds = ceil(durationSeconds / 7).
+        startingCoins:
+          type: integer
+          minimum: 0
+          default: 25
+        roundCoinIncome:
+          type: integer
+          minimum: 0
+          default: 5
+        maxPlayers:
+          type: integer
+          minimum: 2
+          maximum: 8
+          default: 8
+
+    JoinMatchRequest:
+      type: object
+      additionalProperties: false
+      required: [joinCode, nickname]
+      properties:
+        joinCode:
+          type: string
+          minLength: 1
+          maxLength: 12
+        nickname:
+          type: string
+          minLength: 1
+          maxLength: 20
+          description: Trimmed by the server; unique within the match, case-insensitive.
+
+    PlaceBidRequest:
+      type: object
+      additionalProperties: false
+      required: [amount]
+      properties:
+        amount:
+          type: integer
+          minimum: 1
+          description: Coins to add to the player's running total on this item.
+
+    CreateHostRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 3
+          maxLength: 50
+        password:
+          type: string
+          minLength: 8
+          maxLength: 200
+
+    # ---------- Responses ----------
+    LoginResponse:
+      type: object
+      required: [token, staff]
+      properties:
+        token:
+          type: string
+        staff:
+          $ref: '#/components/schemas/StaffAccount'
+
+    JoinMatchResponse:
+      type: object
+      required: [token, matchId, playerId, nickname]
+      properties:
+        token:
+          type: string
+          description: Player token valid only for `matchId`.
+        matchId:
+          type: string
+          format: uuid
+        playerId:
+          type: string
+          format: uuid
+        nickname:
+          type: string
+
+    StaffAccount:
+      type: object
+      required: [staffId, username, role, isActive]
+      properties:
+        staffId:
+          type: string
+          format: uuid
+        username:
+          type: string
+        role:
+          type: string
+          enum: [host, admin]
+        isActive:
+          type: boolean
+
+    MatchSettings:
+      type: object
+      required: [durationSeconds, roundDurationMs, totalRounds, startingCoins, roundCoinIncome, maxPlayers]
+      properties:
+        durationSeconds:
+          type: integer
+        roundDurationMs:
+          type: integer
+          description: Always 7000 (AGENTS.md §2).
+        totalRounds:
+          type: integer
+        startingCoins:
+          type: integer
+        roundCoinIncome:
+          type: integer
+        maxPlayers:
+          type: integer
+
+    Match:
+      type: object
+      required: [matchId, joinCode, status, hostId, settings, playerCount, createdAt, startedAt, endsAt]
+      properties:
+        matchId:
+          type: string
+          format: uuid
+        joinCode:
+          type: string
+        status:
+          $ref: '#/components/schemas/MatchStatus'
+        hostId:
+          type: string
+          format: uuid
+        settings:
+          $ref: '#/components/schemas/MatchSettings'
+        playerCount:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: string
+          format: date-time
+          nullable: true
+        endsAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    MatchStatus:
+      type: string
+      enum: [lobby, running, finished]
+
+    PlayerRef:
+      type: object
+      required: [playerId, nickname]
+      properties:
+        playerId:
+          type: string
+          format: uuid
+        nickname:
+          type: string
+
     MatchState:
       type: object
-      description: TODO — placeholder. Only `roundEndsAt` is required by AGENTS.md.
       required:
+        - matchId
+        - status
+        - serverTime
+        - currentRound
         - roundEndsAt
+        - matchEndsAt
+        - settings
+        - me
+        - players
+        - openItems
+        - closedItems
       properties:
+        matchId:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/MatchStatus'
+        serverTime:
+          type: string
+          format: date-time
+          description: Server UTC time this response was built; lets the client correct for clock skew.
+        currentRound:
+          type: integer
+          minimum: 0
+          description: 0 in the lobby, then 1..totalRounds while running.
         roundEndsAt:
           type: string
           format: date-time
-          description: Server UTC instant the current 7-second round ends.
+          nullable: true
+          description: Server UTC instant the current 7-second round ends. Null unless `running`.
+        matchEndsAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Server UTC instant the match ends. Null unless `running`.
+        joinCode:
+          type: string
+          description: Present only for the owning Host and Admins.
+        settings:
+          $ref: '#/components/schemas/MatchSettings'
+        me:
+          description: The calling player's own figures. Null for Host and Admin tokens.
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/MyPlayerState'
+        players:
+          type: array
+          description: Every player in the match with public figures only (no coins).
+          items:
+            $ref: '#/components/schemas/PublicPlayer'
+        openItems:
+          type: array
+          items:
+            $ref: '#/components/schemas/OpenItem'
+        closedItems:
+          type: array
+          items:
+            $ref: '#/components/schemas/ClosedItem'
+
+    MyPlayerState:
+      type: object
+      required: [playerId, nickname, coins, score]
+      properties:
+        playerId:
+          type: string
+          format: uuid
+        nickname:
+          type: string
+        coins:
+          type: integer
+          minimum: 0
+        score:
+          type: integer
+          minimum: 0
+
+    PublicPlayer:
+      type: object
+      required: [playerId, nickname, score]
+      properties:
+        playerId:
+          type: string
+          format: uuid
+        nickname:
+          type: string
+        score:
+          type: integer
+          minimum: 0
+
+    OpenItem:
+      type: object
+      required: [itemId, pointValue, spawnRound, lifetimeRounds, roundsLeft, currentBid, currentBidHolder]
+      properties:
+        itemId:
+          type: string
+          format: uuid
+        pointValue:
+          type: integer
+          minimum: 10
+          maximum: 100
+        spawnRound:
+          type: integer
+          minimum: 1
+        lifetimeRounds:
+          type: integer
+          minimum: 1
+          maximum: 5
+        roundsLeft:
+          type: integer
+          minimum: 1
+          maximum: 5
+        currentBid:
+          type: integer
+          minimum: 0
+          description: 0 at spawn, then the winning running total from the last resolved round.
+        currentBidHolder:
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/PlayerRef'
+        myTotal:
+          type: integer
+          minimum: 0
+          description: The calling player's running total on this item. Player tokens only.
+        myBidThisRound:
+          type: boolean
+          description: Whether the caller already has an accepted bid on this item this round (AC-3). Player tokens only.
+
+    ClosedItem:
+      type: object
+      required: [itemId, pointValue, spawnRound, lifetimeRounds, closedRound, winningBid, winner]
+      properties:
+        itemId:
+          type: string
+          format: uuid
+        pointValue:
+          type: integer
+          minimum: 10
+          maximum: 100
+        spawnRound:
+          type: integer
+        lifetimeRounds:
+          type: integer
+        closedRound:
+          type: integer
+        winningBid:
+          type: integer
+          minimum: 0
+          description: Final current bid. 0 means nobody bid.
+        winner:
+          description: Null means no winner (AC-8).
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/PlayerRef'
+        myTotal:
+          type: integer
+          minimum: 0
+          description: The calling player's final running total on this item. Player tokens only.
+
+    PlaceBidResponse:
+      type: object
+      required: [bidId, itemId, amount, roundNumber, receivedAt, myTotal, coins]
+      properties:
+        bidId:
+          type: string
+          format: uuid
+        itemId:
+          type: string
+          format: uuid
+        amount:
+          type: integer
+          minimum: 1
+        roundNumber:
+          type: integer
+          minimum: 1
+        receivedAt:
+          type: string
+          format: date-time
+          description: Server time used to break ties (AC-5).
+        myTotal:
+          type: integer
+          minimum: 1
+          description: The player's running total on the item after this bid.
+        coins:
+          type: integer
+          minimum: 0
+          description: The player's coin balance after the charge (AC-8b).
+
+    MatchResults:
+      type: object
+      required: [matchId, finishedAt, totalRounds, rankings]
+      properties:
+        matchId:
+          type: string
+          format: uuid
+        finishedAt:
+          type: string
+          format: date-time
+        totalRounds:
+          type: integer
+          description: Rounds actually played (fewer than planned if ended early).
+        rankings:
+          type: array
+          description: Sorted by `finalScore` descending (AC-18).
+          items:
+            $ref: '#/components/schemas/PlayerResult'
+
+    PlayerResult:
+      type: object
+      required: [rank, playerId, nickname, finalScore, isWinner, gapToWinner, itemsWon, coinsSpent, scoreByRound]
+      properties:
+        rank:
+          type: integer
+          minimum: 1
+          description: Tied players share a rank.
+        playerId:
+          type: string
+          format: uuid
+        nickname:
+          type: string
+        finalScore:
+          type: integer
+          minimum: 0
+        isWinner:
+          type: boolean
+          description: True for every player tied for first.
+        gapToWinner:
+          type: integer
+          minimum: 0
+          description: Top score minus this player's score; 0 for winners.
+        itemsWon:
+          type: integer
+          minimum: 0
+        coinsSpent:
+          type: integer
+          minimum: 0
+        scoreByRound:
+          type: array
+          description: >
+            Score after each round. Index 0 is round 0 (always 0); the last value
+            equals `finalScore` (AC-19). Length is totalRounds + 1.
+          items:
+            type: integer
+            minimum: 0
+
+    Leaderboard:
+      type: object
+      required: [entries, total, limit, offset]
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/LeaderboardEntry'
+        total:
+          type: integer
+          minimum: 0
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    LeaderboardEntry:
+      type: object
+      required: [nickname, score, matchId, finishedAt]
+      properties:
+        nickname:
+          type: string
+        score:
+          type: integer
+          minimum: 0
+        matchId:
+          type: string
+          format: uuid
+        finishedAt:
+          type: string
+          format: date-time
 
     Error:
       type: object
-      required:
-        - error
+      description: Fastify's error shape plus an app-specific machine-readable `code`.
+      required: [statusCode, error, message]
       properties:
-        error:
-          type: string
         statusCode:
           type: integer
+        error:
+          type: string
+          description: HTTP reason phrase, e.g. "Conflict".
+        message:
+          type: string
+          description: Human-readable explanation.
+        code:
+          type: string
+          description: >
+            App error code, e.g. JOIN_CODE_NOT_FOUND, NICKNAME_TAKEN, MATCH_FULL,
+            MATCH_NOT_IN_LOBBY, NOT_ENOUGH_PLAYERS, MATCH_NOT_RUNNING,
+            MATCH_NOT_FINISHED, ITEM_CLOSED, ALREADY_BID_THIS_ROUND,
+            INSUFFICIENT_COINS, TOTAL_NOT_ABOVE_CURRENT_BID, USERNAME_TAKEN.
 
   responses:
+    BadRequest:
+      description: The request failed schema validation.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
     Unauthorized:
-      description: Authentication required or session expired.
+      description: Missing, invalid or expired token, or bad login credentials.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: The caller's role may not perform this action.
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
     NotFound:
-      description: The resource does not exist.
+      description: The resource does not exist, or belongs to a match the caller is not part of (AC-16).
       content:
         application/json:
           schema:

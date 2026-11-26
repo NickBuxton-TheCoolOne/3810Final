@@ -182,6 +182,7 @@ are built.
 | AC-18 | US-11 | The results show every player ranked by final score, with the winner marked and each player's gap behind the winner (the winner's gap is 0, and players tied for first are all marked winners). Each row also shows items won and total coins spent. | `GET /api/matches/{matchId}/results` |
 | AC-19 | US-11 | The results include each player's score after every round, from round 0 (score 0) to the final round. The last value equals the player's final score, and each step up equals the `pointValue` of an item they won in that round. | same |
 | AC-20 | US-11 | The results screen draws a line graph of score against round number, one line per player labelled with their nickname, next to the final scoreboard. It is drawn with plain SVG or canvas in `UI_Elements/`, since `AGENTS.md` §2 allows no chart library. Only players of that match, and its host or an admin, can view it. | UI test + `GET /api/matches/{matchId}/results` |
+| AC-21 | US-10 | An admin can create a Host account and disable it. The create request has no role field, so it always makes a Host. A disabled Host cannot log in, and its existing tokens stop working. Hosts and players get `403`. | `POST /api/admin/hosts`, `POST /api/admin/hosts/{hostId}/disable` |
 
 ## 7. Non-Functional Requirements
 
