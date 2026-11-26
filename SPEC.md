@@ -98,7 +98,14 @@ Entities and relationships only. The SQL lives in `db/migrations/`.
   Rows with `role = admin` are inserted only by developer-run seed scripts.
 - **match**: owned by one staffAccount (host). Fields: `joinCode` (unique while the
   match is open), `status` (`lobby` → `running` → `finished`), `startedAt`,
-  `endsAt`, settings (duration, starting coins, income, max players).
+  `endsAt`, `playerCount` (players currently joined; never above max players, so a
+  join is refused once the match is full), settings (duration, starting coins,
+  income, max players).
+- **matchRound**: one row per round of a match. Fields: `roundNumber` (starts at 1),
+  `startedAt`, `endsAt` (sent to clients as `roundEndsAt`), `resolvedAt` (empty
+  until the round is resolved). Each round is resolved exactly once: if the
+  resolution job is retried, it sees the round is already resolved and does
+  nothing, so no player is charged, scored, or given a new item twice.
 - **matchPlayer**: belongs to one match. Fields: `nickname`, `coins`, `score`.
   `nickname` is unique **within its match** (compared case-insensitively). The
   same nickname may appear in other matches.

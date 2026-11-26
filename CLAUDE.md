@@ -21,6 +21,6 @@ Never to relax a stack rule — change `AGENTS.md` instead, so every agent gets 
 
 ## Related docs
 
-- `SPEC.md` — requirements (source of truth; currently a stub)
+- `SPEC.md` — requirements (source of truth: scope, user stories, acceptance criteria)
 - `openapi.yaml` — REST contract
 - `index.md` — where every file lives

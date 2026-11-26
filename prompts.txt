@@ -167,3 +167,62 @@ I added **§5 API Conventions** to [AGENTS.md](AGENTS.md). Instead of repeating 
 
 ----------------------------------------
 
+[2026-11-26T17:34:39.627Z] PROMPT
+I just committed all pending changes. Referencing the Redis requirement on the parent thread, will the free 30MB server version be sufficient for a proof of concept scale of this project?
+
+[2026-11-26T17:35:02.825Z] RESPONSE SUMMARY
+Yes. 30 MB is plenty for a proof of concept. Memory isn't what will limit you on the free tier; connections and settings are. **Why memory is fine.** In SPEC.md §7, Redis only holds BullMQ jobs, one per match per round. Bids, scores and match state live in SQL Server, which `/state` polling reads. - A worst case of 10 matches at the 30-minute maximum needs about 2,600 round jobs. - At roughly 1–2 KB per job, keeping every job forever adds up to about 3–5 MB. - If you trim finished jobs with `removeOnComplete: 1000` and `removeOnFail: 5000` (or age-based limits), usage stays under 1 MB. **What…
+
+----------------------------------------
+
+[2026-11-26T17:39:03.061Z] PROMPT
+walk me through setting up Redis
+
+[2026-11-26T17:39:22.729Z] RESPONSE SUMMARY
+Here's how to set up the free cloud instance we discussed. You'll create the account yourself, since I don't sign up for services on your behalf. The site's labels may differ slightly from what I describe. ### 1. Create the database 1. Go to **redis.io/try-free** and sign up for Redis Cloud. 2. Create a new database and pick the **Free / Essentials 30 MB** plan. 3. **Cloud and region:** pick the one closest to where your server will run. For local development, the region nearest you is fine. 4. Leave TLS off for now. The free plan doesn't need it, and turning it off keeps the client config si…
+
+----------------------------------------
+
+[2026-11-26T17:57:28.215Z] PROMPT
+I have dotenv installed, but when I ran the command at root, the output was MODULE_NOT FOUND, cannot find module 'dotenv'
+
+[2026-11-26T17:57:47.598Z] RESPONSE SUMMARY
+`dotenv` isn't installed in this project. It's missing from `package.json` and `node_modules/`, and it isn't installed globally either. It may have gone into a different folder, or been the Python package `python-dotenv` (installed with `pip`), which Node can't load. You don't need it. Node 24.9, which this project requires, can read `.env` files on its own with the `--env-file` flag. Run this from the repo root: ```powershell node --env-file=.env -e "const R=require('ioredis'); const r=new R({host:process.env.REDIS_HOST,port:+process.env.REDIS_PORT,password:process.env.REDIS_PASSWORD}); r.pi…
+
+----------------------------------------
+
+[2026-11-26T18:39:43.716Z] PROMPT
+Of the 8 blockers mentioned in the parent thread, what remains to be taken care of?
+
+[2026-11-26T18:40:51.958Z] RESPONSE SUMMARY
+Four of the eight setup items are done. Five things are still open: **Still to do** 1. **Item 4: database schema.** `db/migrations/` is empty, so there are no tables yet. This is the biggest one left. 2. **Item 5: `js/config/`.** The folder doesn't exist. It needs `db.js` (the shared `mssql` connection pool) and `queue.js` (the shared Redis connection and one BullMQ queue, using `maxRetriesPerRequest: null` and `REDIS_KEY_PREFIX`). 3. **Item 6: outdated docs.** - [CLAUDE.md:24](CLAUDE.md:24) still calls `SPEC.md` "currently a stub". The STUB note at the top of CLAUDE.md is about CLAUDE.md its…
+
+----------------------------------------
+
+[2026-11-26T18:44:41.878Z] PROMPT
+yes
+
+[2026-11-26T18:45:18.037Z] RESPONSE SUMMARY
+I made all four small fixes; nothing is committed yet. - **[CLAUDE.md:24](CLAUDE.md:24):** `SPEC.md` is no longer called "currently a stub". It's now described by its scope, user stories and acceptance criteria. - **Fable model name:** in `.claude/settings.json` it's now `claude-fable-5-2`. That file is git-ignored, so this only changes your machine and won't show up in a commit. - **[.gitignore](.gitignore):** now includes `.claude/settings.local.json`, so other contributors' local settings stay out of git too. I confirmed git now ignores the file. - **[README.md](README.md):** went from 2 l…
+
+----------------------------------------
+
+[2026-11-26T18:46:36.478Z] PROMPT
+What schemas do we need for the db/migrations/ folder?
+
+[2026-11-26T18:47:47.560Z] RESPONSE SUMMARY
+You need **six tables**, one per entity in SPEC.md §4, and **two extra columns on `match`** so a retried round-resolution job can't run twice. ## Tables All IDs are `UNIQUEIDENTIFIER`, to match the UUIDs in `openapi.yaml`. All timestamps are `DATETIME2` in UTC. Table names are camelCase. Put `match` in brackets as `[match]` in the SQL, because SQL Server uses `MATCH` as a keyword in graph queries. **1. `staffAccount`** (Host or Admin) - Columns: `staffAccountId` (PK), `username`, `passwordHash`, `role`, `isActive`, `createdAt`. - `UNIQUE(username)`. - `CHECK (role IN ('host','admin'))`. - No …
+
+----------------------------------------
+
+[2026-11-26T18:59:37.727Z] PROMPT
+Update the match table, adding a column to track current number of players. Create a schema for a match round table, adding a SPEC entry, but do not write the migration files yet
+
+[2026-11-26T19:00:39.665Z] RESPONSE SUMMARY
+I updated [SPEC.md](SPEC.md) §4: the **match** entry now has a `playerCount` field, and there's a new **matchRound** entry. I haven't written any migration files. ### `[match]`: changed ```sql CREATE TABLE [match] ( matchId UNIQUEIDENTIFIER NOT NULL CONSTRAINT pkMatch PRIMARY KEY DEFAULT NEWID(), hostId UNIQUEIDENTIFIER NOT NULL CONSTRAINT fkMatchHost REFERENCES staffAccount(staffAccountId), joinCode NVARCHAR(8) NOT NULL, status NVARCHAR(10) NOT NULL DEFAULT 'lobby', durationSeconds INT NOT NULL, startingCoins INT NOT NULL, roundCoinIncome INT NOT NULL, maxPlayers INT NOT NULL, playerCount IN…
+
+----------------------------------------
+
+[2026-11-26T19:06:58.409Z] PROMPT
+Commit to github. Then write the schemas to files
+

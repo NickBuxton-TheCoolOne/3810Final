@@ -32,5 +32,8 @@
     "roots": [
       "<rootDir>/js/TestingScripts"
     ]
+  },
+  "allowScripts": {
+    "ioredis@6.1.0": true
   }
 }
