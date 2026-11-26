@@ -24,7 +24,13 @@ Legend: ✅ exists · 📝 stub, needs content · ⬜ not yet created
 
 | Status | Path | Purpose |
 | --- | --- | --- |
-| ⬜ | `db/migrations/0001_*.sql` | Sequential MS SQL DDL — first migration not yet written |
+| ✅ | `db/migrations/0001_createStaffAccount.sql` | `staffAccount` table (hosts and admins) |
+| ✅ | `db/migrations/0002_createMatch.sql` | `[match]` table, open-join-code filtered index |
+| ✅ | `db/migrations/0003_createMatchRound.sql` | `matchRound` table (round windows, resolution claim) |
+| ✅ | `db/migrations/0004_createMatchPlayer.sql` | `matchPlayer` table (per-match nickname, coins, score) |
+| ✅ | `db/migrations/0005_createItem.sql` | `item` table (one spawn per round) |
+| ✅ | `db/migrations/0006_createBid.sql` | `bid` table (accepted bids only) |
+| ✅ | `db/migrations/0007_createLeaderboardEntry.sql` | `leaderboardEntry` table (finished-match scores) |
 
 Scripts are strictly ordered, never edited after they ship; add a new numbered file instead.
 
@@ -39,7 +45,8 @@ Scripts are strictly ordered, never edited after they ship; add a new numbered f
 | Status | Path | Purpose |
 | --- | --- | --- |
 | 📝 | `js/server.js` | Fastify bootstrap & plugin registration |
-| 📝 | `js/config/` | Shared `mssql` pool and BullMQ/Redis setup — no files yet |
+| ✅ | `js/config/db.js` | Shared `mssql` connection pool (`getPool`, `closePool`) |
+| ✅ | `js/config/queue.js` | Redis connections and the `roundResolution` BullMQ queue |
 | 📝 | `js/api/` | Route plugins, controllers, RBAC hooks — no files yet |
 | 📝 | `js/TestingScripts/` | Jest unit, RBAC and OpenAPI contract tests — no files yet |
 

@@ -226,3 +226,27 @@ I updated [SPEC.md](SPEC.md) §4: the **match** entry now has a `playerCount` fi
 [2026-11-26T19:06:58.409Z] PROMPT
 Commit to github. Then write the schemas to files
 
+[2026-11-26T19:09:57.254Z] RESPONSE SUMMARY
+I committed and pushed the earlier changes as c25a44b on `main`. The schemas are now written as seven migration files. They aren't committed yet, and I haven't run them against a database. | File | Creates | | --- | --- | | [0001_createStaffAccount.sql](db/migrations/0001_createStaffAccount.sql) | `staffAccount` (host and admin accounts) | | [0002_createMatch.sql](db/migrations/0002_createMatch.sql) | `[match]` with `playerCount`, a unique index on open join codes, and a host index | | [0003_createMatchRound.sql](db/migrations/0003_createMatchRound.sql) | `matchRound`, using (`matchId`, `roun…
+
+----------------------------------------
+
+[2026-11-26T19:14:14.837Z] PROMPT
+What needs to be done for db.js and queue.js to be written?
+
+[2026-11-26T19:14:40.123Z] RESPONSE SUMMARY
+Nothing blocks you from writing them now. `mssql`, `bullmq` and `ioredis` are installed, every DB and Redis variable in `.env` has a value, and `js/config/` is empty and ready. What's left is a few decisions, plus one setup step on your side. ### `js/config/db.js` — ready to write - **What it does:** one shared `mssql` connection pool, built from the `DB_*` variables. It exposes `getPool()` and `closePool()`, so `server.js` and the workers reuse a single pool and can shut down cleanly. - **Decision 1 — when to connect:** connect lazily on the first query, or at startup so the server fails imm…
+
+----------------------------------------
+
+[2026-11-26T19:23:21.774Z] PROMPT
+Write the files. Then tell me what needs to be done to mock up healthz.test.js
+
+[2026-11-26T19:25:09.584Z] RESPONSE SUMMARY
+I wrote [js/config/db.js](js/config/db.js) and [js/config/queue.js](js/config/queue.js) and added both to [index.md](index.md). Both modules load, the Redis connection works, and the healthz test still passes. Nothing is committed. ## One change from what we agreed **Job IDs are `matchId-roundNumber`, not `matchId:roundNumber`.** BullMQ won't accept a colon in a custom job ID (it throws "Custom Id cannot contain :"). Using the ID to block duplicate jobs still works the same way. **I also strip a trailing `:` from `REDIS_KEY_PREFIX`.** BullMQ adds its own colon, so `auc3810:` would otherwise p…
+
+----------------------------------------
+
+[2026-11-26T19:26:57.952Z] PROMPT
+commit to github, tagging this push as AI powered
+

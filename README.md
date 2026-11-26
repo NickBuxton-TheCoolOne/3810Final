@@ -38,7 +38,7 @@ rounds to build the highest score before the match ends.
    ```
 
 4. Run the database migrations in `db/migrations/` in numeric order
-   (none written yet).
+   (0001–0007) with `sqlcmd` or SSMS — the scripts use `GO` batch separators.
 
 Load environment variables with Node's built-in `--env-file=.env`;
 the project does not use `dotenv`.
