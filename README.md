@@ -49,7 +49,7 @@ the project does not use `dotenv`.
 | --- | --- |
 | `npm start` | Start the Fastify server (`js/server.js`) |
 | `npm run dev` | Start the server and restart on file changes |
-| `npm run worker` | Start BullMQ workers (not written yet) |
+| `npm run worker` | Start the round-resolution BullMQ worker (needs SQL Server and Redis) |
 | `npm test` | Run all Jest tests |
 | `npm run test:contract` | Run only the OpenAPI contract tests |
 

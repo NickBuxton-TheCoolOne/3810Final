@@ -38,7 +38,7 @@ Scripts are strictly ordered, never edited after they ship; add a new numbered f
 
 | Status | Path | Purpose |
 | --- | --- | --- |
-| ⬜ | `workers/<jobName>Worker.js` | Standalone BullMQ processes — none written |
+| ✅ | `workers/roundResolutionWorker.js` | BullMQ worker for the `roundResolution` queue — resolves rounds, scores items, pays income, ends matches |
 
 ## `js/`
 
@@ -48,7 +48,7 @@ Scripts are strictly ordered, never edited after they ship; add a new numbered f
 | ✅ | `js/config/db.js` | Shared `mssql` connection pool (`getPool`, `closePool`) |
 | ✅ | `js/config/queue.js` | Redis connections and the `roundResolution` BullMQ queue |
 | 📝 | `js/api/` | Route plugins, controllers, RBAC hooks — no files yet |
-| 📝 | `js/TestingScripts/` | Jest unit, RBAC and OpenAPI contract tests — only `healthz.test.js` so far |
+| 📝 | `js/TestingScripts/` | Jest unit, RBAC and OpenAPI contract tests — `healthz.test.js`, `roundResolutionWorker.test.js` so far |
 
 ## `UI_Elements/`
 
