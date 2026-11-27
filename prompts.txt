@@ -250,3 +250,43 @@ I wrote [js/config/db.js](js/config/db.js) and [js/config/queue.js](js/config/qu
 [2026-11-26T19:26:57.952Z] PROMPT
 commit to github, tagging this push as AI powered
 
+[2026-11-26T19:27:19.987Z] RESPONSE SUMMARY
+I committed and pushed the changes to `main` on GitHub as `7b09400` ("DB migrations and js/config db/queue modules"). The commit is marked as AI-written with the line `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>` at the end of the message. That follows the rule in `AGENTS.md` §4 and matches your previous commit. I didn't create a separate git tag; tell me if you wanted one. It contains: - the seven migration files in `db/migrations/` - `js/config/db.js` and `js/config/queue.js` - your edits to `README.md`, `index.md` and `prompts.txt` `.env` and `.claude/settings.local.json` are n…
+
+----------------------------------------
+
+[2026-11-26T19:32:33.374Z] PROMPT
+I ran the first migration in mssm but no tables are showing up in the GUI
+
+[2026-11-26T19:33:10.475Z] RESPONSE SUMMARY
+The migration probably ran in the wrong database. `0001_createStaffAccount.sql` has no `USE` statement, so the table is created in whatever database the query window is pointed at. A new SSMS query window points at **`master`** unless you change it. Two other common causes: Object Explorer hasn't been refreshed, or the script errored. **1. Refresh Object Explorer.** SSMS doesn't update the tree on its own. Expand your project database, right-click **Tables**, and choose **Refresh** (or press F5). **2. Check where the table went.** In the same query window you used, run: ```sql SELECT DB_NAME(…
+
+----------------------------------------
+
+[2026-11-26T19:38:26.197Z] PROMPT
+I have staffAccount up, but mssm says tehre is no such table 'staffAccount' when I paste in the match sql
+
+[2026-11-26T19:38:36.926Z] RESPONSE SUMMARY
+The SQL in 0002 is fine. `[match].hostId` has a foreign key to `staffAccount`, so SQL Server looks up `staffAccount` **in the database the query window is pointed at**. You most likely pasted 0002 into a new query window, and new windows open on `master`. `staffAccount` lives in your project database, so from `master` it really doesn't exist. **Fix:** in the window holding the match script, select your project database in the **Available Databases** dropdown on the toolbar (not `master`), then run it again. Or put this above the pasted script, without saving it into the migration file: ```sql…
+
+----------------------------------------
+
+[2026-11-26T19:47:45.572Z] PROMPT
+wire db.js and queue.js into server.js as you previously mentioned
+
+[2026-11-26T19:49:15.400Z] RESPONSE SUMMARY
+I've wired `db.js` and `queue.js` into the server, and `npm test` passes all 4 tests. I haven't started the server against your real SQL Server and Redis, and nothing is committed. **[js/server.js](js/server.js)** - The database pool is now available to the app as `app.db` and the queue as `app.queue`. Neither connects until something first uses it, so the server can be built in tests without SQL Server or Redis running. - When the app shuts down, it closes the queue first, then the database pool. - On startup, the server checks that it can reach SQL Server and then Redis before it starts lis…
+
+----------------------------------------
+
+[2026-11-27T15:20:05.410Z] PROMPT
+What changes mentioned in this session still need implementation?
+
+[2026-11-27T15:20:17.805Z] RESPONSE SUMMARY
+These items were mentioned in this session but aren't built or confirmed yet. I'm working from what we discussed, not from a fresh scan of the repo. **From this change** - **Nothing is committed yet.** That covers the edits to `server.js`, the `/healthz` test, `package.json` and `index.md`, plus your own earlier edits to `prompts.txt`. - **The server hasn't been started against your real SQL Server and Redis.** The tests use fake versions of both, so the startup checks haven't run against real services. - **`/healthz` still returns `stub: true`** next to `status: 'ok'`. The REST contract in `…
+
+----------------------------------------
+
+[2026-11-27T15:23:05.001Z] PROMPT
+Do that, marking the commit as AI generated
+

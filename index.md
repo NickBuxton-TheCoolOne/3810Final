@@ -44,11 +44,11 @@ Scripts are strictly ordered, never edited after they ship; add a new numbered f
 
 | Status | Path | Purpose |
 | --- | --- | --- |
-| 📝 | `js/server.js` | Fastify bootstrap & plugin registration |
+| 📝 | `js/server.js` | Fastify bootstrap; `app.db` / `app.queue` wired, closed on shutdown — routes not yet registered |
 | ✅ | `js/config/db.js` | Shared `mssql` connection pool (`getPool`, `closePool`) |
 | ✅ | `js/config/queue.js` | Redis connections and the `roundResolution` BullMQ queue |
 | 📝 | `js/api/` | Route plugins, controllers, RBAC hooks — no files yet |
-| 📝 | `js/TestingScripts/` | Jest unit, RBAC and OpenAPI contract tests — no files yet |
+| 📝 | `js/TestingScripts/` | Jest unit, RBAC and OpenAPI contract tests — only `healthz.test.js` so far |
 
 ## `UI_Elements/`
 

@@ -10,17 +10,35 @@
 
 const path = require('path');
 const Fastify = require('fastify');
+const db = require('./config/db');
+const queue = require('./config/queue');
 
 /**
  * Build a configured Fastify instance without starting it.
  * Exported separately from main() so Jest + Supertest can drive the app in-process
  * without binding a port (js/TestingScripts/).
  *
- * @returns {import('fastify').FastifyInstance}
+ * Neither the SQL pool nor Redis is opened here: getPool() and
+ * getRoundResolutionQueue() connect on first use, so building the app (and the
+ * /healthz test) needs no live services. main() checks both before listening.
+ *
+ * @param {object} [deps] Overrides for tests; defaults to the real config modules.
+ * @returns {Promise<import('fastify').FastifyInstance>}
  */
-async function buildApp() {
+async function buildApp({ dbModule = db, queueModule = queue } = {}) {
   const app = Fastify({
     logger: true,
+  });
+
+  // 1. db pool, 2. redis/queue. Route handlers reach them as this.db / this.queue
+  // (or request.server.db) and must use parameterized queries only (AGENTS.md §2).
+  app.decorate('db', dbModule);
+  app.decorate('queue', queueModule);
+
+  // Close the queue before the pool so no job is added against a closed pool.
+  app.addHook('onClose', async () => {
+    await queueModule.closeQueue();
+    await dbModule.closePool();
   });
 
   // TODO: static hosting for UI_Elements/ (vanilla HTML/CSS/JS frontend).
@@ -29,9 +47,7 @@ async function buildApp() {
   //   prefix: '/',
   // });
 
-  // TODO: connection pool + queue once js/config/ modules exist, then RBAC hooks
-  // and route plugins from js/api/. Registered in dependency order:
-  //   1. db pool    2. redis/queue    3. auth hooks    4. routes
+  // TODO: 3. RBAC/auth hooks and 4. route plugins from js/api/.
 
   app.get('/healthz', async () => ({
     status: 'ok',
@@ -40,6 +56,16 @@ async function buildApp() {
   }));
 
   return app;
+}
+
+// ioredis retries forever (maxRetriesPerRequest: null), so a down Redis would
+// make waitUntilReady() hang; cap each startup check instead.
+function withTimeout(promise, ms, what) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} not reachable within ${ms} ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 async function main() {
@@ -56,9 +82,14 @@ async function main() {
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
 
   try {
+    // Fail fast: refuse to serve if SQL Server or Redis is unreachable.
+    await withTimeout(app.db.getPool(), 15000, 'SQL Server');
+    await withTimeout(app.queue.getRoundResolutionQueue().waitUntilReady(), 15000, 'Redis');
     await app.listen({ port, host });
   } catch (err) {
     app.log.error(err, 'failed to start server');
+    // Closing a Redis client that never connected can also hang; don't wait on it.
+    await withTimeout(app.close(), 5000, 'shutdown').catch(() => {});
     process.exit(1);
   }
 }

@@ -9,8 +9,8 @@
     "node": ">=24.9"
   },
   "scripts": {
-    "start": "node js/server.js",
-    "dev": "node --watch js/server.js",
+    "start": "node --env-file=.env js/server.js",
+    "dev": "node --env-file=.env --watch js/server.js",
     "worker": "echo \"TODO: no workers/ scripts yet — add one per BullMQ queue\" && exit 1",
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand",
     "test:contract": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --testPathPatterns=openapi"
