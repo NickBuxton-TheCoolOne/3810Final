@@ -28,6 +28,9 @@ const queue = require('./config/queue');
 async function buildApp({ dbModule = db, queueModule = queue } = {}) {
   const app = Fastify({
     logger: true,
+    // Reject unknown body fields with 400 instead of silently stripping them,
+    // so `additionalProperties: false` in openapi.yaml means what it says.
+    ajv: { customOptions: { removeAdditional: false } },
   });
 
   // 1. db pool, 2. redis/queue. Route handlers reach them as this.db / this.queue
@@ -41,13 +44,16 @@ async function buildApp({ dbModule = db, queueModule = queue } = {}) {
     await dbModule.closePool();
   });
 
-  // TODO: static hosting for UI_Elements/ (vanilla HTML/CSS/JS frontend).
-  // await app.register(require('@fastify/static'), {
-  //   root: path.join(__dirname, '..', 'UI_Elements'),
-  //   prefix: '/',
-  // });
+  //static hosting for UI_Elements/ (vanilla HTML/CSS/JS frontend).
+    await app.register(require('@fastify/static'), {
+    root: path.join(__dirname, '..', 'UI_Elements'),
+    prefix: '/',
+  });
 
-  // TODO: 3. RBAC/auth hooks and 4. route plugins from js/api/.
+  // 3. Auth: per-route preHandlers live in js/api/authHooks.js (authenticate,
+  //    requireRole, requirePlayerInMatch). 4. Route plugins from js/api/.
+  await app.register(require('./api/auth'));
+  await app.register(require('./api/leaderboard'));
 
   app.get('/healthz', async () => ({
     status: 'ok',

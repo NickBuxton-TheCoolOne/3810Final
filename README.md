@@ -40,6 +40,15 @@ rounds to build the highest score before the match ends.
 4. Run the database migrations in `db/migrations/` in numeric order
    (0001–0007) with `sqlcmd` or SSMS — the scripts use `GO` batch separators.
 
+5. Create an admin account (admins are never created through the API or UI):
+
+   ```powershell
+   npm run seed:admin -- <username>
+   ```
+
+   It prompts for the password without echoing it (or reads `ADMIN_PASSWORD`
+   if set) and refuses to touch a username that already exists.
+
 Load environment variables with Node's built-in `--env-file=.env`;
 the project does not use `dotenv`.
 
@@ -50,6 +59,7 @@ the project does not use `dotenv`.
 | `npm start` | Start the Fastify server (`js/server.js`) |
 | `npm run dev` | Start the server and restart on file changes |
 | `npm run worker` | Start the round-resolution BullMQ worker (needs SQL Server and Redis) |
+| `npm run seed:admin -- <username>` | Create an admin account (prompts for the password) |
 | `npm test` | Run all Jest tests |
 | `npm run test:contract` | Run only the OpenAPI contract tests |
 

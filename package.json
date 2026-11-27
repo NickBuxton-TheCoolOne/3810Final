@@ -12,6 +12,7 @@
     "start": "node --env-file=.env js/server.js",
     "dev": "node --env-file=.env --watch js/server.js",
     "worker": "node --env-file=.env workers/roundResolutionWorker.js",
+    "seed:admin": "node --env-file=.env db/seeds/seedAdmin.js",
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand",
     "test:contract": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --testPathPatterns=openapi"
   },

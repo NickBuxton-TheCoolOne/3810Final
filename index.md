@@ -34,6 +34,10 @@ Legend: ✅ exists · 📝 stub, needs content · ⬜ not yet created
 
 Scripts are strictly ordered, never edited after they ship; add a new numbered file instead.
 
+| Status | Path | Purpose |
+| --- | --- | --- |
+| ✅ | `db/seeds/seedAdmin.js` | Developer-run admin seed (`npm run seed:admin -- <username>`); the only way to create an admin |
+
 ## `workers/`
 
 | Status | Path | Purpose |
