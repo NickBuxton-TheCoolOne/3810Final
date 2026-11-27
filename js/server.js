@@ -54,6 +54,7 @@ async function buildApp({ dbModule = db, queueModule = queue } = {}) {
   //    requireRole, requirePlayerInMatch). 4. Route plugins from js/api/.
   await app.register(require('./api/auth'));
   await app.register(require('./api/leaderboard'));
+  await app.register(require('./api/matches'));
 
   app.get('/healthz', async () => ({
     status: 'ok',
