@@ -31,7 +31,7 @@ jest.mock('../config/queue', () => ({
 
 const db = require('../config/db');
 const queue = require('../config/queue');
-const { createToken } = require('../api/authTokens');
+const { createToken, readToken } = require('../api/authTokens');
 const { buildApp } = require('../server');
 
 const hostId = '11111111-1111-4111-8111-111111111111';
@@ -159,6 +159,86 @@ describe('POST /api/matches', () => {
     const res = await create(staffToken(hostId), {});
     expect(res.statusCode).toBe(201);
     expect(global.fakeSql.queries).toHaveLength(2);
+  });
+});
+
+describe('POST /api/matches/join', () => {
+  const join = (payload) => app.inject({ method: 'POST', url: '/api/matches/join', payload });
+  const playerId = '55555555-5555-4555-8555-555555555555';
+
+  test('400 when nickname is missing', async () => {
+    const res = await join({ joinCode: 'ABC234' });
+    expect(res.statusCode).toBe(400);
+  });
+
+  test('400 for an unknown field', async () => {
+    const res = await join({ joinCode: 'ABC234', nickname: 'Bob', bogus: 1 });
+    expect(res.statusCode).toBe(400);
+  });
+
+  test('400 for a whitespace-only nickname', async () => {
+    const res = await join({ joinCode: 'ABC234', nickname: '   ' });
+    expect(res.statusCode).toBe(400);
+    expect(global.fakeSql.queries).toHaveLength(0);
+  });
+
+  test('404 JOIN_CODE_NOT_FOUND for an unknown code', async () => {
+    global.fakeSql.results.push({ recordset: [] });
+    const res = await join({ joinCode: 'ZZZZZZ', nickname: 'Bob' });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().code).toBe('JOIN_CODE_NOT_FOUND');
+    expect(db.sql.Transaction.instances[0].rollback).toHaveBeenCalled();
+  });
+
+  test('409 MATCH_NOT_IN_LOBBY once the match is running', async () => {
+    global.fakeSql.results.push({ recordset: [matchRow({ status: 'running' })] });
+    const res = await join({ joinCode: 'ABC234', nickname: 'Bob' });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().code).toBe('MATCH_NOT_IN_LOBBY');
+  });
+
+  test('409 MATCH_FULL when playerCount reaches maxPlayers', async () => {
+    global.fakeSql.results.push({ recordset: [matchRow({ playerCount: 8 })] });
+    const res = await join({ joinCode: 'ABC234', nickname: 'Bob' });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().code).toBe('MATCH_FULL');
+  });
+
+  test('409 NICKNAME_TAKEN when the nickname is already in the match', async () => {
+    global.fakeSql.results.push({ recordset: [matchRow()] }, { recordset: [{ taken: 1 }] });
+    const res = await join({ joinCode: 'ABC234', nickname: 'bob' });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().code).toBe('NICKNAME_TAKEN');
+    expect(db.sql.Transaction.instances[0].commit).not.toHaveBeenCalled();
+  });
+
+  test('409 NICKNAME_TAKEN when a concurrent join wins the unique constraint', async () => {
+    const dup = Object.assign(new Error('duplicate key'), { number: 2627 });
+    global.fakeSql.results.push({ recordset: [matchRow()] }, { recordset: [] }, dup);
+    const res = await join({ joinCode: 'ABC234', nickname: 'Bob' });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().code).toBe('NICKNAME_TAKEN');
+    expect(db.sql.Transaction.instances[0].rollback).toHaveBeenCalled();
+  });
+
+  test('201 joins and returns a match-scoped player token', async () => {
+    global.fakeSql.results.push(
+      { recordset: [matchRow()] },
+      { recordset: [] },
+      { recordset: [{ matchPlayerId: playerId, nickname: 'Bob' }] },
+    );
+    const res = await join({ joinCode: 'abc234', nickname: '  Bob ' });
+    expect(res.statusCode).toBe(201);
+
+    const body = res.json();
+    expect(body).toMatchObject({ matchId, playerId, nickname: 'Bob' });
+    expect(readToken(body.token)).toMatchObject({ kind: 'player', playerId, matchId });
+
+    expect(global.fakeSql.queries[0].inputs.joinCode).toBe('ABC234');
+    expect(global.fakeSql.queries[2].text).toMatch(/INSERT INTO matchPlayer/);
+    expect(global.fakeSql.queries[2].text).toMatch(/playerCount = playerCount \+ 1/);
+    expect(global.fakeSql.queries[2].inputs).toMatchObject({ nickname: 'Bob', coins: 25 });
+    expect(db.sql.Transaction.instances[0].commit).toHaveBeenCalled();
   });
 });
 

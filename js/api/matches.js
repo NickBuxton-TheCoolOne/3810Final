@@ -1,11 +1,14 @@
-// js/api/matches.js — match lifecycle routes (openapi.yaml: createMatch, startMatch).
+// js/api/matches.js — match lifecycle routes (openapi.yaml: createMatch, joinMatch, startMatch).
 //
 //   POST /api/matches                   Host/Admin: open a lobby with a fresh join code.
+//   POST /api/matches/join              anyone: join a lobby by code + nickname, get a
+//                                       match-scoped player token (AC-11).
 //   POST /api/matches/{matchId}/start   owning Host or Admin: lobby -> running, open
 //                                       round 1, spawn its item, schedule its resolution.
 'use strict';
 const crypto = require('node:crypto');
 const { authenticate, requireRole } = require('./authHooks');
+const { createToken } = require('./authTokens');
 const {
   ROUND_MS, generatePointValue, generateLifetimeRounds,
 } = require('../../workers/roundResolutionWorker');
@@ -24,6 +27,16 @@ const createMatchBody = {
     startingCoins: { type: 'integer', minimum: 0, default: 25 },
     roundCoinIncome: { type: 'integer', minimum: 0, default: 5 },
     maxPlayers: { type: 'integer', minimum: 2, maximum: 8, default: 8 },
+  },
+};
+
+const joinMatchBody = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['joinCode', 'nickname'],
+  properties: {
+    joinCode: { type: 'string', minLength: 1, maxLength: 12 },
+    nickname: { type: 'string', minLength: 1, maxLength: 20 },
   },
 };
 
@@ -106,6 +119,81 @@ module.exports = async function matchRoutes(app) {
         if (!duplicateKeyErrors.has(err.number) || attempt >= maxJoinCodeAttempts) throw err;
       }
     }
+  });
+
+  // No auth (openapi security: []): this is how a player gets their token.
+  app.post('/api/matches/join', {
+    schema: { body: joinMatchBody },
+  }, async (request, reply) => {
+    const nickname = request.body.nickname.trim();
+    if (!nickname) {
+      return sendError(reply, 400, 'Bad Request', 'Nickname must not be blank.');
+    }
+    // Codes are generated upper-case; accept them typed in lower case too.
+    const joinCode = request.body.joinCode.trim().toUpperCase();
+
+    const { sql } = app.db;
+    const pool = await app.db.getPool();
+    const tx = new sql.Transaction(pool);
+    await tx.begin();
+
+    let player;
+    let row;
+    try {
+      // UPDLOCK: concurrent joins (and a racing start) serialize on the match row,
+      // so the playerCount / maxPlayers check below can't be overrun.
+      ({ recordset: [row] } = await tx.request()
+        .input('joinCode', sql.NVarChar(12), joinCode)
+        .query(`SELECT * FROM [match] WITH (UPDLOCK, ROWLOCK)
+                WHERE joinCode = @joinCode AND status <> 'finished'`));
+
+      let refusal = null;
+      if (!row) {
+        refusal = [404, 'Not Found', 'No open match has this join code.', 'JOIN_CODE_NOT_FOUND'];
+      } else if (row.status !== 'lobby') {
+        refusal = [409, 'Conflict', 'Match is not in the lobby.', 'MATCH_NOT_IN_LOBBY'];
+      } else if (row.playerCount >= row.maxPlayers) {
+        refusal = [409, 'Conflict', 'Match is full.', 'MATCH_FULL'];
+      } else {
+        // nickname column is case-insensitive (CI collation), so 'Bob' matches 'bob'.
+        const taken = await tx.request()
+          .input('matchId', sql.UniqueIdentifier, row.matchId)
+          .input('nickname', sql.NVarChar(20), nickname)
+          .query('SELECT 1 AS taken FROM matchPlayer WHERE matchId = @matchId AND nickname = @nickname');
+        if (taken.recordset.length) {
+          refusal = [409, 'Conflict', 'Nickname is already taken in this match.', 'NICKNAME_TAKEN'];
+        }
+      }
+      if (refusal) {
+        await tx.rollback();
+        return sendError(reply, ...refusal);
+      }
+
+      const inserted = await tx.request()
+        .input('matchId', sql.UniqueIdentifier, row.matchId)
+        .input('nickname', sql.NVarChar(20), nickname)
+        .input('coins', sql.Int, row.startingCoins)
+        .query(`INSERT INTO matchPlayer (matchId, nickname, coins)
+                OUTPUT inserted.matchPlayerId, inserted.nickname
+                VALUES (@matchId, @nickname, @coins);
+                UPDATE [match] SET playerCount = playerCount + 1 WHERE matchId = @matchId;`);
+      player = inserted.recordset[0];
+      await tx.commit();
+    } catch (err) {
+      await tx.rollback().catch(() => {});
+      // uqMatchPlayerNickname: lost a race with another join using the same nickname.
+      if (duplicateKeyErrors.has(err.number)) {
+        return sendError(reply, 409, 'Conflict', 'Nickname is already taken in this match.', 'NICKNAME_TAKEN');
+      }
+      throw err;
+    }
+
+    return reply.code(201).send({
+      token: createToken({ kind: 'player', playerId: player.matchPlayerId, matchId: row.matchId }),
+      matchId: row.matchId,
+      playerId: player.matchPlayerId,
+      nickname: player.nickname,
+    });
   });
 
   app.post('/api/matches/:matchId/start', {

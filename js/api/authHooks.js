@@ -35,9 +35,14 @@ function requireRole(...roles) {
   };
 }
 
+// GUIDs are case-insensitive; mssql returns them upper-case but clients may send lower-case.
+function sameGuid(a, b) {
+  return typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
+}
+
 // Player tokens only work on their own match. Any other match looks like it doesn't exist (AC-16).
 async function requirePlayerInMatch(request, reply) {
-  if (request.auth.role === 'player' && request.auth.matchId !== request.params.matchId) {
+  if (request.auth.role === 'player' && !sameGuid(request.auth.matchId, request.params.matchId)) {
     return fail(reply, 404, 'Not Found', 'Match not found.');
   }
 }
