@@ -134,3 +134,62 @@ describe('POST /api/admin/hosts', () => {
     expect(res.statusCode).toBe(500);
   });
 });
+
+describe('POST /api/admin/hosts/{hostId}/disable', () => {
+  const disable = (auth, id = hostId) => app.inject({
+    method: 'POST', url: `/api/admin/hosts/${id}/disable`, headers: auth ? { authorization: auth } : {},
+  });
+  const disabledRow = { staffAccountId: hostId, username: 'somehost', role: 'host', isActive: false };
+
+  test('401 without a token', async () => {
+    const res = await disable(null);
+    expect(res.statusCode).toBe(401);
+    expect(global.fakeSql.queries).toHaveLength(0);
+  });
+
+  test('403 for a host', async () => {
+    const res = await disable(staffToken(hostId));
+    expect(res.statusCode).toBe(403);
+    expect(global.fakeSql.queries).toHaveLength(0);
+  });
+
+  test('403 for a player', async () => {
+    const res = await disable(playerToken());
+    expect(res.statusCode).toBe(403);
+    expect(global.fakeSql.queries).toHaveLength(0);
+  });
+
+  test('400 for a hostId that is not a uuid', async () => {
+    const res = await disable(staffToken(adminId), 'not-a-uuid');
+    expect(res.statusCode).toBe(400);
+    expect(global.fakeSql.queries).toHaveLength(0);
+  });
+
+  test('200 disables the host and returns it', async () => {
+    global.fakeSql.results.push({ recordset: [disabledRow] });
+    const res = await disable(staffToken(adminId));
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ staffId: hostId, username: 'somehost', role: 'host', isActive: false });
+
+    const [update] = global.fakeSql.queries;
+    expect(update.text).toMatch(/SET isActive = 0/);
+    expect(update.text).toMatch(/role = 'host'/);
+    expect(update.inputs.hostId).toBe(hostId);
+  });
+
+  test('200 again for an already-disabled host (idempotent)', async () => {
+    global.fakeSql.results.push({ recordset: [disabledRow] }, { recordset: [disabledRow] });
+    const first = await disable(staffToken(adminId));
+    const second = await disable(staffToken(adminId));
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    expect(second.json().isActive).toBe(false);
+  });
+
+  test('404 for an unknown id or an admin account', async () => {
+    global.fakeSql.results.push({ recordset: [] });
+    const res = await disable(staffToken(adminId), adminId);
+    expect(res.statusCode).toBe(404);
+  });
+});
