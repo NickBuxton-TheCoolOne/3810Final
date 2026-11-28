@@ -457,3 +457,149 @@ describe('GET /api/matches/:matchId/state', () => {
     expect(res.json().joinCode).toBe('ABC234');
   });
 });
+
+describe('POST /api/matches/:matchId/items/:itemId/bids', () => {
+  const p1 = '55555555-5555-4555-8555-555555555555';
+  const itemId = '66666666-6666-4666-8666-666666666666';
+  const bidId = '77777777-7777-4777-8777-777777777777';
+  const receivedAt = new Date('2026-11-27T10:00:12.345Z');
+  const url = `/api/matches/${matchId}/items/${itemId}/bids`;
+  const meToken = (forMatch = matchId) => `Bearer ${createToken({ kind: 'player', playerId: p1, matchId: forMatch })}`;
+  const bid = (auth, payload = { amount: 4 }) => app.inject({
+    method: 'POST', url, headers: auth ? { authorization: auth } : {}, payload,
+  });
+
+  const running = () => ({ recordset: [{ status: 'running', endsAt: new Date(Date.now() + 60000) }] });
+  const openItem = (currentBid = 5) => ({ recordset: [{ status: 'open', currentBid }] });
+  const round = { recordset: [{ roundNumber: 3 }] };
+
+  // match, item, round, player, my prior bids on the item, then the insert and coin update
+  function script({ coins = 10, priorTotal = 0, bidThisRound = 0, currentBid = 5 } = {}, extra = []) {
+    global.fakeSql.results.push(
+      running(),
+      openItem(currentBid),
+      round,
+      { recordset: [{ coins }] },
+      { recordset: [{ total: priorTotal, bidThisRound }] },
+      ...extra,
+    );
+  }
+  const tx = () => db.sql.Transaction.instances[0];
+  const inserted = () => global.fakeSql.queries.some((q) => q.text.includes('INSERT INTO bid'));
+
+  test('401 without a token', async () => {
+    expect((await bid()).statusCode).toBe(401);
+  });
+
+  test('403 for staff', async () => {
+    expect((await bid(staffToken(adminId))).statusCode).toBe(403);
+  });
+
+  test('404 for a player of another match, without touching the db', async () => {
+    const res = await bid(meToken('99999999-9999-4999-8999-999999999999'));
+    expect(res.statusCode).toBe(404);
+    expect(global.fakeSql.queries).toHaveLength(0);
+  });
+
+  test.each([
+    ['zero', { amount: 0 }],
+    ['a fraction', { amount: 1.5 }],
+    ['a string', { amount: 'lots' }],
+    ['missing', {}],
+    ['an extra field', { amount: 3, matchPlayerId: p1 }],
+  ])('400 when amount is %s', async (_label, payload) => {
+    const res = await bid(meToken(), payload);
+    expect(res.statusCode).toBe(400);
+    expect(global.fakeSql.queries).toHaveLength(0);
+  });
+
+  test('404 when the item is not in this match', async () => {
+    global.fakeSql.results.push(running(), { recordset: [] });
+    const res = await bid(meToken());
+    expect(res.statusCode).toBe(404);
+    expect(tx().rollback).toHaveBeenCalled();
+  });
+
+  test.each([
+    ['finished', { status: 'finished', endsAt: new Date(Date.now() - 1000) }],
+    ['past its end time', { status: 'running', endsAt: new Date(Date.now() - 1000) }],
+    ['still in the lobby', { status: 'lobby', endsAt: null }],
+  ])('409 MATCH_NOT_RUNNING when the match is %s', async (_label, row) => {
+    global.fakeSql.results.push({ recordset: [row] }, openItem(), round);
+    const res = await bid(meToken());
+    expect(res.statusCode).toBe(409);
+    expect(res.json().code).toBe('MATCH_NOT_RUNNING');
+    expect(inserted()).toBe(false);
+  });
+
+  test('409 ITEM_CLOSED for a closed item', async () => {
+    global.fakeSql.results.push(running(), { recordset: [{ status: 'closed', currentBid: 5 }] }, round);
+    const res = await bid(meToken());
+    expect(res.statusCode).toBe(409);
+    expect(res.json().code).toBe('ITEM_CLOSED');
+    expect(inserted()).toBe(false);
+  });
+
+  test('409 ALREADY_BID_THIS_ROUND for a second bid in the same round', async () => {
+    script({ priorTotal: 6, bidThisRound: 1 });
+    const res = await bid(meToken());
+    expect(res.statusCode).toBe(409);
+    expect(res.json().code).toBe('ALREADY_BID_THIS_ROUND');
+    expect(inserted()).toBe(false);
+    expect(tx().rollback).toHaveBeenCalled();
+  });
+
+  test('409 ALREADY_BID_THIS_ROUND when a racing bid hits the unique key', async () => {
+    script({ currentBid: 0 }, [Object.assign(new Error('duplicate'), { number: 2627 })]);
+    const res = await bid(meToken());
+    expect(res.statusCode).toBe(409);
+    expect(res.json().code).toBe('ALREADY_BID_THIS_ROUND');
+    expect(tx().commit).not.toHaveBeenCalled();
+    expect(tx().rollback).toHaveBeenCalled();
+  });
+
+  test('422 INSUFFICIENT_COINS when the bid is above my coins', async () => {
+    script({ coins: 3 });
+    const res = await bid(meToken(), { amount: 4 });
+    expect(res.statusCode).toBe(422);
+    expect(res.json().code).toBe('INSUFFICIENT_COINS');
+    expect(inserted()).toBe(false);
+    expect(tx().rollback).toHaveBeenCalled();
+  });
+
+  test('422 TOTAL_NOT_ABOVE_CURRENT_BID when my total only ties the current bid', async () => {
+    script({ priorTotal: 1, currentBid: 5 });
+    const res = await bid(meToken(), { amount: 4 });
+    expect(res.statusCode).toBe(422);
+    expect(res.json().code).toBe('TOTAL_NOT_ABOVE_CURRENT_BID');
+    expect(inserted()).toBe(false);
+  });
+
+  test('201: cumulative total beats the current bid and coins drop by the bid only', async () => {
+    script({ coins: 10, priorTotal: 3, currentBid: 6 }, [
+      { recordset: [{ bidId, receivedAt }] },
+      { recordset: [{ coins: 6 }] },
+    ]);
+    const res = await bid(meToken(), { amount: 4 });
+    expect(res.statusCode).toBe(201);
+    expect(res.json()).toEqual({
+      bidId, itemId, amount: 4, roundNumber: 3, receivedAt: receivedAt.toISOString(), myTotal: 7, coins: 6,
+    });
+    expect(tx().commit).toHaveBeenCalled();
+
+    const insert = global.fakeSql.queries.find((q) => q.text.includes('INSERT INTO bid'));
+    expect(insert.inputs).toMatchObject({ itemId, playerId: p1, amount: 4, roundNumber: 3 });
+    const update = global.fakeSql.queries.find((q) => q.text.includes('UPDATE matchPlayer'));
+    expect(update.inputs.amount).toBe(4);
+  });
+
+  test('201: first bid on an item may spend every coin', async () => {
+    script({ coins: 6, priorTotal: 0, currentBid: 0 }, [
+      { recordset: [{ bidId, receivedAt }] },
+      { recordset: [{ coins: 0 }] },
+    ]);
+    const res = await bid(meToken(), { amount: 6 });
+    expect(res.statusCode).toBe(201);
+    expect(res.json()).toMatchObject({ myTotal: 6, coins: 0 });
+  });
+});

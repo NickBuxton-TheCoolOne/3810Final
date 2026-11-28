@@ -1,4 +1,5 @@
-// js/api/matches.js — match lifecycle routes (openapi.yaml: createMatch, joinMatch, startMatch).
+// js/api/matches.js — match lifecycle routes (openapi.yaml: createMatch, joinMatch, startMatch,
+//   getMatchState, placeBid).
 //
 //   POST /api/matches                   Host/Admin: open a lobby with a fresh join code.
 //   POST /api/matches/join              anyone: join a lobby by code + nickname, get a
@@ -7,6 +8,9 @@
 //                                       round 1, spawn its item, schedule its resolution.
 //   GET  /api/matches/{matchId}/state   players of the match, owning Host, Admin: the
 //                                       polled snapshot. Bids stay sealed (AC-4).
+//   POST /api/matches/{matchId}/items/{itemId}/bids
+//                                       players of the match: place a sealed, cumulative,
+//                                       all-pay bid on an open item (AC-1, AC-1b, AC-2, AC-3).
 'use strict';
 const crypto = require('node:crypto');
 const { authenticate, requireRole, requirePlayerInMatch } = require('./authHooks');
@@ -46,6 +50,22 @@ const matchIdParams = {
   type: 'object',
   required: ['matchId'],
   properties: { matchId: { type: 'string', format: 'uuid' } },
+};
+
+const itemBidParams = {
+  type: 'object',
+  required: ['matchId', 'itemId'],
+  properties: {
+    matchId: { type: 'string', format: 'uuid' },
+    itemId: { type: 'string', format: 'uuid' },
+  },
+};
+
+const placeBidBody = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['amount'],
+  properties: { amount: { type: 'integer', minimum: 1 } },
 };
 
 function generateJoinCode() {
@@ -382,6 +402,111 @@ module.exports = async function matchRoutes(app) {
     };
     if (!isPlayer) state.joinCode = row.joinCode;
     return state;
+  });
+
+  app.post('/api/matches/:matchId/items/:itemId/bids', {
+    schema: { params: itemBidParams, body: placeBidBody },
+    preHandler: [authenticate, requireRole('player'), requirePlayerInMatch],
+  }, async (request, reply) => {
+    const { matchId, itemId } = request.params;
+    const { amount } = request.body;
+    const { playerId } = request.auth;
+    const { sql } = app.db;
+    const pool = await app.db.getPool();
+    const tx = new sql.Transaction(pool);
+    await tx.begin();
+    const query = (text, inputs = {}) => {
+      const req = tx.request()
+        .input('matchId', sql.UniqueIdentifier, matchId)
+        .input('itemId', sql.UniqueIdentifier, itemId)
+        .input('playerId', sql.UniqueIdentifier, playerId);
+      for (const [name, [type, value]] of Object.entries(inputs)) req.input(name, type, value);
+      return req.query(text).then((r) => r.recordset);
+    };
+
+    try {
+      let refusal = null;
+      const notRunning = [409, 'Conflict', 'The match is not running.', 'MATCH_NOT_RUNNING'];
+
+      const [match] = await query('SELECT status, endsAt FROM [match] WHERE matchId = @matchId');
+      // UPDLOCK on the item, round and player rows: two bids from the same player, or a
+      // bid racing round resolution, serialize here instead of reading stale totals.
+      const [item] = match ? await query(`SELECT status, currentBid FROM item WITH (UPDLOCK, ROWLOCK)
+                                          WHERE itemId = @itemId AND matchId = @matchId`) : [];
+      const [round] = item ? await query(`SELECT TOP 1 roundNumber FROM matchRound WITH (UPDLOCK, ROWLOCK)
+                                          WHERE matchId = @matchId AND resolvedAt IS NULL
+                                          ORDER BY roundNumber DESC`) : [];
+
+      if (!match) {
+        refusal = [404, 'Not Found', 'Match not found.'];
+      } else if (match.status !== 'running' || (match.endsAt && new Date(match.endsAt) <= new Date())) {
+        refusal = notRunning;
+      } else if (!item) {
+        refusal = [404, 'Not Found', 'Item not found.'];
+      } else if (item.status !== 'open') {
+        refusal = [409, 'Conflict', 'The item is closed.', 'ITEM_CLOSED'];
+      } else if (!round) {
+        refusal = notRunning;
+      }
+
+      let player;
+      let prior;
+      if (!refusal) {
+        [player] = await query(`SELECT coins FROM matchPlayer WITH (UPDLOCK, ROWLOCK)
+                                WHERE matchPlayerId = @playerId AND matchId = @matchId`);
+        [prior] = await query(`SELECT COALESCE(SUM(amount), 0) AS total,
+                                      MAX(CASE WHEN roundNumber = @roundNumber THEN 1 ELSE 0 END) AS bidThisRound
+                               FROM bid WHERE itemId = @itemId AND matchPlayerId = @playerId`, {
+          roundNumber: [sql.Int, round.roundNumber],
+        });
+        const priorTotal = prior ? prior.total : 0;
+        if (!player) {
+          refusal = [404, 'Not Found', 'Match not found.'];
+        } else if (prior && prior.bidThisRound) {
+          refusal = [409, 'Conflict', 'You already bid on this item this round.', 'ALREADY_BID_THIS_ROUND'];
+        } else if (amount > player.coins) {
+          refusal = [422, 'Unprocessable Entity', 'Not enough coins for this bid.', 'INSUFFICIENT_COINS'];
+        } else if (priorTotal + amount <= item.currentBid) {
+          refusal = [422, 'Unprocessable Entity', 'Your total must be above the current bid.',
+            'TOTAL_NOT_ABOVE_CURRENT_BID'];
+        }
+      }
+      if (refusal) {
+        await tx.rollback();
+        return sendError(reply, ...refusal);
+      }
+
+      // All-pay: the coins are spent now and never refunded (AC-1).
+      const [bid] = await query(`INSERT INTO bid (itemId, matchPlayerId, amount, roundNumber)
+                                 OUTPUT inserted.bidId, inserted.receivedAt
+                                 VALUES (@itemId, @playerId, @amount, @roundNumber)`, {
+        amount: [sql.Int, amount],
+        roundNumber: [sql.Int, round.roundNumber],
+      });
+      const [wallet] = await query(`UPDATE matchPlayer SET coins = coins - @amount
+                                    OUTPUT inserted.coins
+                                    WHERE matchPlayerId = @playerId AND matchId = @matchId`, {
+        amount: [sql.Int, amount],
+      });
+      await tx.commit();
+
+      return reply.code(201).send({
+        bidId: bid.bidId,
+        itemId,
+        amount,
+        roundNumber: round.roundNumber,
+        receivedAt: bid.receivedAt,
+        myTotal: (prior ? prior.total : 0) + amount,
+        coins: wallet.coins,
+      });
+    } catch (err) {
+      await tx.rollback().catch(() => {});
+      if (duplicateKeyErrors.has(err.number)) {
+        return sendError(reply, 409, 'Conflict', 'You already bid on this item this round.',
+          'ALREADY_BID_THIS_ROUND');
+      }
+      throw err;
+    }
   });
 };
 
