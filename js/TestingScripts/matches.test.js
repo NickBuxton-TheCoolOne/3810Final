@@ -313,3 +313,147 @@ describe('POST /api/matches/:matchId/start', () => {
     expect(res.statusCode).toBe(200);
   });
 });
+
+describe('GET /api/matches/:matchId/state', () => {
+  const p1 = '55555555-5555-4555-8555-555555555555';
+  const p2 = '66666666-6666-4666-8666-666666666666';
+  const item1 = '77777777-7777-4777-8777-777777777777';
+  const item2 = '88888888-8888-4888-8888-888888888888';
+  const roundEndsAt = new Date('2026-11-27T10:00:07Z');
+  const matchEndsAt = new Date('2026-11-27T10:03:00Z');
+
+  const meToken = (mid = matchId) => `Bearer ${createToken({ kind: 'player', playerId: p1, matchId: mid })}`;
+  const getState = (auth, id = matchId) => app.inject({
+    method: 'GET', url: `/api/matches/${id}/state`, headers: auth ? { authorization: auth } : {},
+  });
+
+  const players = [
+    { matchPlayerId: p1, nickname: 'Alice', coins: 12, score: 4 },
+    { matchPlayerId: p2, nickname: 'Bob', coins: 30, score: 0 },
+  ];
+  const items = [
+    {
+      itemId: item1, pointValue: 6, spawnRound: 1, lifetimeRounds: 3, roundsLeft: 2, status: 'open',
+      currentBid: 9, closedRound: null, currentBidHolderId: p2, currentBidHolderNickname: 'Bob',
+      winnerPlayerId: null, winnerNickname: null,
+    },
+    {
+      itemId: item2, pointValue: 4, spawnRound: 1, lifetimeRounds: 1, roundsLeft: 0, status: 'closed',
+      currentBid: 5, closedRound: 1, currentBidHolderId: p1, currentBidHolderNickname: 'Alice',
+      winnerPlayerId: p1, winnerNickname: 'Alice',
+    },
+  ];
+
+  // match, latest round, players, items (+ the caller's bids for player tokens)
+  function scriptRunning(extra = []) {
+    global.fakeSql.results.push(
+      { recordset: [matchRow({ status: 'running', startedAt: new Date('2026-11-27T10:00:00Z'), endsAt: matchEndsAt })] },
+      { recordset: [{ roundNumber: 2, endsAt: roundEndsAt }] },
+      { recordset: players },
+      { recordset: items },
+      ...extra,
+    );
+  }
+
+  test('401 without a token', async () => {
+    const res = await getState();
+    expect(res.statusCode).toBe(401);
+  });
+
+  test('404 for a player of another match, without touching the db', async () => {
+    const res = await getState(meToken('99999999-9999-4999-8999-999999999999'));
+    expect(res.statusCode).toBe(404);
+    expect(global.fakeSql.queries).toHaveLength(0);
+  });
+
+  test('404 when the match does not exist', async () => {
+    global.fakeSql.results.push({ recordset: [] });
+    const res = await getState(staffToken(adminId));
+    expect(res.statusCode).toBe(404);
+  });
+
+  test('403 for a host who does not own the match', async () => {
+    global.fakeSql.results.push({ recordset: [matchRow()] });
+    const res = await getState(staffToken(otherHostId));
+    expect(res.statusCode).toBe(403);
+  });
+
+  test('lobby: round 0 and no countdowns', async () => {
+    global.fakeSql.results.push(
+      { recordset: [matchRow()] },
+      { recordset: [] },
+      { recordset: players },
+      { recordset: [] },
+    );
+    const res = await getState(staffToken(hostId));
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.status).toBe('lobby');
+    expect(body.currentRound).toBe(0);
+    expect(body.roundEndsAt).toBeNull();
+    expect(body.matchEndsAt).toBeNull();
+    expect(body.openItems).toEqual([]);
+    expect(body.closedItems).toEqual([]);
+    expect(body.settings.totalRounds).toBe(26);
+    expect(Number.isNaN(Date.parse(body.serverTime))).toBe(false);
+  });
+
+  test('player sees own coins and totals, but no one else\'s coins and no join code', async () => {
+    scriptRunning([{ recordset: [{ itemId: item1, myTotal: 7, bidThisRound: 1 }, { itemId: item2, myTotal: 5, bidThisRound: 0 }] }]);
+    const res = await getState(meToken());
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+
+    expect(body.currentRound).toBe(2);
+    expect(body.roundEndsAt).toBe(roundEndsAt.toISOString());
+    expect(body.matchEndsAt).toBe(matchEndsAt.toISOString());
+    expect(body.me).toEqual({ playerId: p1, nickname: 'Alice', coins: 12, score: 4 });
+    expect(body.players).toEqual([
+      { playerId: p1, nickname: 'Alice', score: 4 },
+      { playerId: p2, nickname: 'Bob', score: 0 },
+    ]);
+    expect(body).not.toHaveProperty('joinCode');
+
+    expect(body.openItems).toEqual([{
+      itemId: item1, pointValue: 6, spawnRound: 1, lifetimeRounds: 3, roundsLeft: 2,
+      currentBid: 9, currentBidHolder: { playerId: p2, nickname: 'Bob' }, myTotal: 7, myBidThisRound: true,
+    }]);
+    expect(body.closedItems).toEqual([{
+      itemId: item2, pointValue: 4, spawnRound: 1, lifetimeRounds: 1, closedRound: 1,
+      winningBid: 5, winner: { playerId: p1, nickname: 'Alice' }, myTotal: 5,
+    }]);
+
+    const bidQuery = global.fakeSql.queries[4];
+    expect(bidQuery.inputs.playerId).toBe(p1);
+    expect(bidQuery.inputs.currentRound).toBe(2);
+  });
+
+  test('player with no bids gets myTotal 0 and myBidThisRound false', async () => {
+    scriptRunning([{ recordset: [] }]);
+    const res = await getState(meToken());
+    const [open] = res.json().openItems;
+    expect(open.myTotal).toBe(0);
+    expect(open.myBidThisRound).toBe(false);
+  });
+
+  test('admin sees the join code, me is null, and no per-player bid fields', async () => {
+    scriptRunning();
+    const res = await getState(staffToken(adminId));
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.joinCode).toBe('ABC234');
+    expect(body.me).toBeNull();
+    expect(body.openItems[0]).not.toHaveProperty('myTotal');
+    expect(body.openItems[0]).not.toHaveProperty('myBidThisRound');
+    expect(body.closedItems[0]).not.toHaveProperty('myTotal');
+    expect(body.players.every((p) => !('coins' in p))).toBe(true);
+    expect(global.fakeSql.queries).toHaveLength(4);
+  });
+
+  test('owning host may read the state', async () => {
+    scriptRunning();
+    const res = await getState(staffToken(hostId));
+    expect(res.statusCode).toBe(200);
+    expect(res.json().joinCode).toBe('ABC234');
+  });
+});

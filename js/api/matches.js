@@ -5,9 +5,11 @@
 //                                       match-scoped player token (AC-11).
 //   POST /api/matches/{matchId}/start   owning Host or Admin: lobby -> running, open
 //                                       round 1, spawn its item, schedule its resolution.
+//   GET  /api/matches/{matchId}/state   players of the match, owning Host, Admin: the
+//                                       polled snapshot. Bids stay sealed (AC-4).
 'use strict';
 const crypto = require('node:crypto');
-const { authenticate, requireRole } = require('./authHooks');
+const { authenticate, requireRole, requirePlayerInMatch } = require('./authHooks');
 const { createToken } = require('./authTokens');
 const {
   ROUND_MS, generatePointValue, generateLifetimeRounds,
@@ -269,6 +271,117 @@ module.exports = async function matchRoutes(app) {
       delayMs: round.endsAt.getTime() - Date.now(),
     });
     return toMatch(match);
+  });
+
+  app.get('/api/matches/:matchId/state', {
+    schema: { params: matchIdParams },
+    preHandler: [authenticate, requirePlayerInMatch],
+  }, async (request, reply) => {
+    const { matchId } = request.params;
+    const { auth } = request;
+    const isPlayer = auth.role === 'player';
+    const { sql } = app.db;
+    const pool = await app.db.getPool();
+    const query = (text, inputs = {}) => {
+      const req = pool.request().input('matchId', sql.UniqueIdentifier, matchId);
+      for (const [name, [type, value]] of Object.entries(inputs)) req.input(name, type, value);
+      return req.query(text).then((r) => r.recordset);
+    };
+
+    const [row] = await query('SELECT * FROM [match] WHERE matchId = @matchId');
+    if (!row) return sendError(reply, 404, 'Not Found', 'Match not found.');
+    if (auth.role === 'host' && !sameId(row.hostId, auth.staffAccountId)) {
+      return sendError(reply, 403, 'Forbidden', 'Only the match owner or an admin may view this match.');
+    }
+
+    const [round] = await query(`SELECT TOP 1 roundNumber, endsAt FROM matchRound
+                                 WHERE matchId = @matchId ORDER BY roundNumber DESC`);
+    const currentRound = row.status === 'lobby' || !round ? 0 : round.roundNumber;
+    const running = row.status === 'running';
+
+    const playerRows = await query(`SELECT matchPlayerId, nickname, coins, score FROM matchPlayer
+                                    WHERE matchId = @matchId ORDER BY joinedAt, matchPlayerId`);
+    const itemRows = await query(`SELECT i.itemId, i.pointValue, i.spawnRound, i.lifetimeRounds, i.roundsLeft,
+                                         i.status, i.currentBid, i.closedRound,
+                                         i.currentBidHolderId, h.nickname AS currentBidHolderNickname,
+                                         i.winnerPlayerId, w.nickname AS winnerNickname
+                                  FROM item i
+                                  LEFT JOIN matchPlayer h ON h.matchPlayerId = i.currentBidHolderId
+                                  LEFT JOIN matchPlayer w ON w.matchPlayerId = i.winnerPlayerId
+                                  WHERE i.matchId = @matchId
+                                  ORDER BY i.spawnRound, i.itemId`);
+
+    // The caller's own sealed bids: running total per item and whether they bid this round.
+    const myBids = new Map();
+    let me = null;
+    if (isPlayer) {
+      const mine = playerRows.find((p) => sameId(p.matchPlayerId, auth.playerId));
+      if (mine) {
+        me = { playerId: mine.matchPlayerId, nickname: mine.nickname, coins: mine.coins, score: mine.score };
+      }
+      const bidRows = await query(`SELECT b.itemId, SUM(b.amount) AS myTotal,
+                                          MAX(CASE WHEN b.roundNumber = @currentRound THEN 1 ELSE 0 END) AS bidThisRound
+                                   FROM bid b JOIN item i ON i.itemId = b.itemId
+                                   WHERE i.matchId = @matchId AND b.matchPlayerId = @playerId
+                                   GROUP BY b.itemId`, {
+        playerId: [sql.UniqueIdentifier, auth.playerId],
+        currentRound: [sql.Int, currentRound],
+      });
+      for (const b of bidRows) myBids.set(String(b.itemId).toLowerCase(), b);
+    }
+    const myBidFor = (itemId) => myBids.get(String(itemId).toLowerCase());
+    const ref = (playerId, nickname) => (playerId ? { playerId, nickname } : null);
+
+    const openItems = [];
+    const closedItems = [];
+    for (const it of itemRows) {
+      const base = {
+        itemId: it.itemId,
+        pointValue: it.pointValue,
+        spawnRound: it.spawnRound,
+        lifetimeRounds: it.lifetimeRounds,
+      };
+      const bid = myBidFor(it.itemId);
+      if (it.status === 'open') {
+        const item = {
+          ...base,
+          roundsLeft: it.roundsLeft,
+          currentBid: it.currentBid,
+          currentBidHolder: ref(it.currentBidHolderId, it.currentBidHolderNickname),
+        };
+        if (isPlayer) {
+          item.myTotal = bid ? bid.myTotal : 0;
+          item.myBidThisRound = Boolean(bid && bid.bidThisRound);
+        }
+        openItems.push(item);
+      } else {
+        const item = {
+          ...base,
+          closedRound: it.closedRound,
+          winningBid: it.currentBid,
+          winner: ref(it.winnerPlayerId, it.winnerNickname),
+        };
+        if (isPlayer) item.myTotal = bid ? bid.myTotal : 0;
+        closedItems.push(item);
+      }
+    }
+
+    const state = {
+      matchId: row.matchId,
+      status: row.status,
+      serverTime: new Date().toISOString(),
+      currentRound,
+      roundEndsAt: running && round ? round.endsAt : null,
+      matchEndsAt: running ? row.endsAt : null,
+      settings: toMatch(row).settings,
+      me,
+      // PublicPlayer only: no coins for anyone (AC-4).
+      players: playerRows.map((p) => ({ playerId: p.matchPlayerId, nickname: p.nickname, score: p.score })),
+      openItems,
+      closedItems,
+    };
+    if (!isPlayer) state.joinCode = row.joinCode;
+    return state;
   });
 };
 

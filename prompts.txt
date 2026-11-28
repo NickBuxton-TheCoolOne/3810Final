@@ -479,3 +479,19 @@ I fixed the bug, and all 12 live checks against your local `BidWar` database pas
 [2026-11-27T22:18:19.651Z] PROMPT
 Commit the working tree changes with a sensible message.
 
+[2026-11-27T22:18:32.668Z] RESPONSE SUMMARY
+I committed everything on `main` as `4bbf494`, with the message "Add joinMatch route and fix case-sensitive GUID check". The working tree is now clean, and nothing has been pushed. The commit includes the join route, the fix to the match ID check, both test files, and your `prompts.txt` changes.
+
+----------------------------------------
+
+[2026-11-27T22:21:34.816Z] PROMPT
+create the get match state api
+
+[2026-11-27T22:26:01.616Z] RESPONSE SUMMARY
+The get match state API (`GET /api/matches/{matchId}/state`) is done and passes all its tests. **Who can see what:** - **Access:** a player can only see their own match; any other match returns 404. A host can only see matches they own; others return 403. Admins can see any match. No token returns 401, and a match that doesn't exist returns 404. - **Bids stay secret:** `players` lists no coin amounts. A player sees their own coins in `me`, and on each item only their own bid total and whether they've bid this round. - **Join code:** only hosts and admins see `joinCode`. For them, `me` is null…
+
+----------------------------------------
+
+[2026-11-28T04:07:08.957Z] PROMPT
+Commit the working tree changes with a sensible message.
+
