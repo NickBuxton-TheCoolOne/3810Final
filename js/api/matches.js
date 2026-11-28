@@ -1,5 +1,5 @@
 // js/api/matches.js — match lifecycle routes (openapi.yaml: createMatch, joinMatch, startMatch,
-//   getMatchState, placeBid, endMatch).
+//   getMatchState, placeBid, endMatch, getMatchResults).
 //
 //   POST /api/matches                   Host/Admin: open a lobby with a fresh join code.
 //   POST /api/matches/join              anyone: join a lobby by code + nickname, get a
@@ -14,6 +14,8 @@
 //   POST /api/matches/{matchId}/end     owning Host or Admin: end a running match now. Open
 //                                       items resolve as if their countdown ran out, then
 //                                       scores go to the leaderboard (AC-15).
+//   GET  /api/matches/{matchId}/results players of the match, owning Host, Admin: final
+//                                       rankings and per-round score history (AC-19).
 'use strict';
 const crypto = require('node:crypto');
 const { authenticate, requireRole, requirePlayerInMatch } = require('./authHooks');
@@ -560,6 +562,80 @@ module.exports = async function matchRoutes(app) {
       throw err;
     }
     return toMatch(match);
+  });
+
+  app.get('/api/matches/:matchId/results', {
+    schema: { params: matchIdParams },
+    preHandler: [authenticate, requirePlayerInMatch],
+  }, async (request, reply) => {
+    const { matchId } = request.params;
+    const { auth } = request;
+    const { sql } = app.db;
+    const pool = await app.db.getPool();
+    const query = (text) => pool.request()
+      .input('matchId', sql.UniqueIdentifier, matchId)
+      .query(text).then((r) => r.recordset);
+
+    const [row] = await query('SELECT * FROM [match] WHERE matchId = @matchId');
+    if (!row) return sendError(reply, 404, 'Not Found', 'Match not found.');
+    if (auth.role === 'host' && !sameId(row.hostId, auth.staffAccountId)) {
+      return sendError(reply, 403, 'Forbidden', 'Only the match owner or an admin may view this match.');
+    }
+    if (row.status !== 'finished') {
+      return sendError(reply, 409, 'Conflict', 'The match has not finished.', 'MATCH_NOT_FINISHED');
+    }
+
+    const [rounds] = await query('SELECT MAX(roundNumber) AS totalRounds FROM matchRound WHERE matchId = @matchId');
+    const totalRounds = (rounds && rounds.totalRounds) || 0;
+    const playerRows = await query(`SELECT matchPlayerId, nickname, score FROM matchPlayer
+                                    WHERE matchId = @matchId ORDER BY joinedAt, matchPlayerId`);
+    const wonRows = await query(`SELECT winnerPlayerId, pointValue, closedRound FROM item
+                                 WHERE matchId = @matchId AND winnerPlayerId IS NOT NULL`);
+    const spentRows = await query(`SELECT b.matchPlayerId, SUM(b.amount) AS coinsSpent
+                                   FROM bid b JOIN item i ON i.itemId = b.itemId
+                                   WHERE i.matchId = @matchId
+                                   GROUP BY b.matchPlayerId`);
+
+    const key = (id) => String(id).toLowerCase();
+    const spent = new Map(spentRows.map((s) => [key(s.matchPlayerId), s.coinsSpent]));
+    const players = playerRows.map((p) => {
+      const won = wonRows.filter((w) => sameId(w.winnerPlayerId, p.matchPlayerId));
+      // Running score after each round; index 0 is the start of the match (AC-19).
+      const gained = new Array(totalRounds + 1).fill(0);
+      for (const w of won) {
+        if (w.closedRound >= 1 && w.closedRound <= totalRounds) gained[w.closedRound] += w.pointValue;
+      }
+      const scoreByRound = [];
+      gained.reduce((sum, g) => { scoreByRound.push(sum + g); return sum + g; }, 0);
+      return {
+        playerId: p.matchPlayerId,
+        nickname: p.nickname,
+        finalScore: p.score,
+        itemsWon: won.length,
+        coinsSpent: spent.get(key(p.matchPlayerId)) || 0,
+        scoreByRound,
+      };
+    });
+
+    // Highest score first; tied players share a rank and everyone tied for first wins.
+    players.sort((a, b) => b.finalScore - a.finalScore);
+    const topScore = players.length ? players[0].finalScore : 0;
+    const rankings = players.map((p) => {
+      const rank = players.findIndex((q) => q.finalScore === p.finalScore) + 1;
+      return {
+        rank,
+        playerId: p.playerId,
+        nickname: p.nickname,
+        finalScore: p.finalScore,
+        isWinner: p.finalScore === topScore,
+        gapToWinner: topScore - p.finalScore,
+        itemsWon: p.itemsWon,
+        coinsSpent: p.coinsSpent,
+        scoreByRound: p.scoreByRound,
+      };
+    });
+
+    return { matchId: row.matchId, finishedAt: row.finishedAt, totalRounds, rankings };
   });
 };
 

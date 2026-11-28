@@ -689,3 +689,92 @@ describe('POST /api/matches/:matchId/end', () => {
     expect(res.statusCode).toBe(200);
   });
 });
+
+describe('GET /api/matches/:matchId/results', () => {
+  const results = (auth, id = matchId) => app.inject({
+    method: 'GET', url: `/api/matches/${id}/results`, headers: auth ? { authorization: auth } : {},
+  });
+  const finishedAt = new Date('2026-11-27T10:03:00Z');
+  const finished = (overrides = {}) => matchRow({ status: 'finished', finishedAt, ...overrides });
+  const ann = 'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA';
+  const ben = 'BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB';
+  const cat = 'CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCCC';
+
+  // Match, total rounds, players, won items, coins spent.
+  function scriptResults(first = finished()) {
+    global.fakeSql.results.push(
+      { recordset: [first] },
+      { recordset: [{ totalRounds: 3 }] },
+      { recordset: [
+        { matchPlayerId: cat, nickname: 'Cat', score: 20 },
+        { matchPlayerId: ann, nickname: 'Ann', score: 50 },
+        { matchPlayerId: ben, nickname: 'Ben', score: 50 },
+      ] },
+      { recordset: [
+        { winnerPlayerId: ann, pointValue: 30, closedRound: 1 },
+        { winnerPlayerId: ann, pointValue: 20, closedRound: 3 },
+        { winnerPlayerId: ben.toLowerCase(), pointValue: 50, closedRound: 2 },
+        { winnerPlayerId: cat, pointValue: 20, closedRound: 3 },
+      ] },
+      { recordset: [
+        { matchPlayerId: ann.toLowerCase(), coinsSpent: 12 },
+        { matchPlayerId: ben, coinsSpent: 9 },
+      ] },
+    );
+  }
+
+  test('401 without a token', async () => {
+    const res = await results(null);
+    expect(res.statusCode).toBe(401);
+  });
+
+  test('404 for a player of another match, without touching the database', async () => {
+    const res = await results(playerToken(), '99999999-9999-4999-8999-999999999999');
+    expect(res.statusCode).toBe(404);
+    expect(global.fakeSql.queries).toHaveLength(0);
+  });
+
+  test('404 when the match does not exist', async () => {
+    global.fakeSql.results.push({ recordset: [] });
+    const res = await results(staffToken(adminId));
+    expect(res.statusCode).toBe(404);
+  });
+
+  test('403 for a host who does not own the match', async () => {
+    global.fakeSql.results.push({ recordset: [finished()] });
+    const res = await results(staffToken(otherHostId));
+    expect(res.statusCode).toBe(403);
+  });
+
+  test('409 MATCH_NOT_FINISHED for a running match', async () => {
+    global.fakeSql.results.push({ recordset: [matchRow({ status: 'running' })] });
+    const res = await results(staffToken(hostId));
+    expect(res.statusCode).toBe(409);
+    expect(res.json().code).toBe('MATCH_NOT_FINISHED');
+  });
+
+  test('200 with tied rankings, winners, gaps and per-round scores', async () => {
+    scriptResults();
+    const res = await results(staffToken(adminId));
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.matchId).toBe(matchId);
+    expect(body.finishedAt).toBe(finishedAt.toISOString());
+    expect(body.totalRounds).toBe(3);
+    expect(body.rankings).toEqual([
+      { rank: 1, playerId: ann, nickname: 'Ann', finalScore: 50, isWinner: true, gapToWinner: 0,
+        itemsWon: 2, coinsSpent: 12, scoreByRound: [0, 30, 30, 50] },
+      { rank: 1, playerId: ben, nickname: 'Ben', finalScore: 50, isWinner: true, gapToWinner: 0,
+        itemsWon: 1, coinsSpent: 9, scoreByRound: [0, 0, 50, 50] },
+      { rank: 3, playerId: cat, nickname: 'Cat', finalScore: 20, isWinner: false, gapToWinner: 30,
+        itemsWon: 1, coinsSpent: 0, scoreByRound: [0, 0, 0, 20] },
+    ]);
+  });
+
+  test('200 for a player of the match and for the owning host', async () => {
+    scriptResults();
+    expect((await results(playerToken(), matchId.toUpperCase())).statusCode).toBe(200);
+    scriptResults(finished({ hostId: hostId.toUpperCase() }));
+    expect((await results(staffToken(hostId))).statusCode).toBe(200);
+  });
+});
