@@ -603,3 +603,89 @@ describe('POST /api/matches/:matchId/items/:itemId/bids', () => {
     expect(res.json()).toMatchObject({ myTotal: 6, coins: 0 });
   });
 });
+
+describe('POST /api/matches/:matchId/end', () => {
+  const end = (auth, id = matchId) => app.inject({
+    method: 'POST', url: `/api/matches/${id}/end`, headers: auth ? { authorization: auth } : {},
+  });
+  const running = (overrides = {}) => matchRow({ status: 'running', ...overrides });
+  const itemId = '55555555-5555-4555-8555-555555555555';
+  const winnerId = '66666666-6666-4666-8666-666666666666';
+
+  // Lock, claim rounds, open items, bids, item update, score update, finish, reload.
+  function scriptEnd(first = running()) {
+    global.fakeSql.results.push(
+      { recordset: [first] },
+      { recordset: [{ roundNumber: 4 }] },
+      { recordset: [{ itemId, pointValue: 40, roundsLeft: 3, currentBid: 2, currentBidHolderId: winnerId }] },
+      { recordset: [{ itemId, matchPlayerId: winnerId, amount: 2, receivedAt: new Date() }] },
+      { rowsAffected: [1] },
+      { rowsAffected: [1] },
+      { rowsAffected: [1] },
+      { recordset: [running({ status: 'finished', hostId: first.hostId })] },
+    );
+  }
+
+  test('401 without a token', async () => {
+    const res = await end(null);
+    expect(res.statusCode).toBe(401);
+  });
+
+  test('403 for a player', async () => {
+    const res = await end(playerToken());
+    expect(res.statusCode).toBe(403);
+  });
+
+  test('404 when the match does not exist', async () => {
+    global.fakeSql.results.push({ recordset: [] });
+    const res = await end(staffToken(hostId));
+    expect(res.statusCode).toBe(404);
+    expect(db.sql.Transaction.instances[0].rollback).toHaveBeenCalled();
+  });
+
+  test('403 for a host who does not own the match', async () => {
+    global.fakeSql.results.push({ recordset: [running()] });
+    const res = await end(staffToken(otherHostId));
+    expect(res.statusCode).toBe(403);
+  });
+
+  test('409 MATCH_NOT_RUNNING for a lobby match', async () => {
+    global.fakeSql.results.push({ recordset: [matchRow()] });
+    const res = await end(staffToken(hostId));
+    expect(res.statusCode).toBe(409);
+    expect(res.json().code).toBe('MATCH_NOT_RUNNING');
+  });
+
+  test('409 MATCH_NOT_RUNNING for a finished match', async () => {
+    global.fakeSql.results.push({ recordset: [running({ status: 'finished' })] });
+    const res = await end(staffToken(hostId));
+    expect(res.statusCode).toBe(409);
+    expect(res.json().code).toBe('MATCH_NOT_RUNNING');
+  });
+
+  test('200 closes open items, awards points and writes the leaderboard', async () => {
+    scriptEnd();
+    const res = await end(staffToken(hostId));
+    expect(res.statusCode).toBe(200);
+    expect(res.json().status).toBe('finished');
+
+    const tx = db.sql.Transaction.instances[0];
+    expect(tx.commit).toHaveBeenCalled();
+    expect(tx.rollback).not.toHaveBeenCalled();
+
+    const q = global.fakeSql.queries;
+    expect(q[1].text).toMatch(/UPDATE matchRound SET resolvedAt/);
+    expect(q[3].inputs.roundNumber).toBe(4);
+    expect(q[4].inputs).toMatchObject({ status: 'closed', roundsLeft: 0, winnerId, closedRound: 4 });
+    expect(q[5].inputs).toMatchObject({ matchPlayerId: winnerId, points: 40 });
+    expect(q[6].text).toMatch(/status = 'finished'/);
+    expect(q[6].text).toMatch(/INSERT INTO leaderboardEntry/);
+    expect(queue.enqueueRoundResolution).not.toHaveBeenCalled();
+  });
+
+  test('admin may end a match they do not own', async () => {
+    scriptEnd(running({ hostId: otherHostId }));
+    const res = await end(staffToken(adminId));
+    expect(res.statusCode).toBe(200);
+  });
+});

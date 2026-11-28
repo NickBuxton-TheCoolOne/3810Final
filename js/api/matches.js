@@ -1,5 +1,5 @@
 // js/api/matches.js — match lifecycle routes (openapi.yaml: createMatch, joinMatch, startMatch,
-//   getMatchState, placeBid).
+//   getMatchState, placeBid, endMatch).
 //
 //   POST /api/matches                   Host/Admin: open a lobby with a fresh join code.
 //   POST /api/matches/join              anyone: join a lobby by code + nickname, get a
@@ -11,12 +11,15 @@
 //   POST /api/matches/{matchId}/items/{itemId}/bids
 //                                       players of the match: place a sealed, cumulative,
 //                                       all-pay bid on an open item (AC-1, AC-1b, AC-2, AC-3).
+//   POST /api/matches/{matchId}/end     owning Host or Admin: end a running match now. Open
+//                                       items resolve as if their countdown ran out, then
+//                                       scores go to the leaderboard (AC-15).
 'use strict';
 const crypto = require('node:crypto');
 const { authenticate, requireRole, requirePlayerInMatch } = require('./authHooks');
 const { createToken } = require('./authTokens');
 const {
-  ROUND_MS, generatePointValue, generateLifetimeRounds,
+  ROUND_MS, generatePointValue, generateLifetimeRounds, settleOpenItems, finishMatch,
 } = require('../../workers/roundResolutionWorker');
 
 // No 0/O or 1/I so codes are easy to read aloud.
@@ -507,6 +510,56 @@ module.exports = async function matchRoutes(app) {
       }
       throw err;
     }
+  });
+  app.post('/api/matches/:matchId/end', {
+    schema: { params: matchIdParams },
+    preHandler: staffOnly,
+  }, async (request, reply) => {
+    const { matchId } = request.params;
+    const { sql } = app.db;
+    const pool = await app.db.getPool();
+    const tx = new sql.Transaction(pool);
+    await tx.begin();
+
+    let match;
+    try {
+      const { recordset } = await tx.request()
+        .input('matchId', sql.UniqueIdentifier, matchId)
+        .query('SELECT * FROM [match] WITH (UPDLOCK, ROWLOCK) WHERE matchId = @matchId');
+      const row = recordset[0];
+      let refusal = null;
+      if (!row) refusal = [404, 'Not Found', 'Match not found.'];
+      else if (request.auth.role === 'host' && !sameId(row.hostId, request.auth.staffAccountId)) {
+        refusal = [403, 'Forbidden', 'Only the match owner or an admin may end this match.'];
+      } else if (row.status !== 'running') {
+        refusal = [409, 'Conflict', 'The match is not running.', 'MATCH_NOT_RUNNING'];
+      }
+      if (refusal) {
+        await tx.rollback();
+        return sendError(reply, ...refusal);
+      }
+
+      // Claim the round in progress so its queued job finds nothing left to do.
+      const rounds = await tx.request()
+        .input('matchId', sql.UniqueIdentifier, matchId)
+        .query(`UPDATE matchRound SET resolvedAt = SYSUTCDATETIME()
+                WHERE matchId = @matchId AND resolvedAt IS NULL;
+                SELECT MAX(roundNumber) AS roundNumber FROM matchRound WHERE matchId = @matchId;`);
+      const roundNumber = (rounds.recordset[0] && rounds.recordset[0].roundNumber) || 0;
+
+      await settleOpenItems(tx, sql, { matchId, roundNumber, isFinal: true });
+      await finishMatch(tx, sql, matchId);
+
+      const finished = await tx.request()
+        .input('matchId', sql.UniqueIdentifier, matchId)
+        .query('SELECT * FROM [match] WHERE matchId = @matchId');
+      match = finished.recordset[0];
+      await tx.commit();
+    } catch (err) {
+      await tx.rollback().catch(() => {});
+      throw err;
+    }
+    return toMatch(match);
   });
 };
 

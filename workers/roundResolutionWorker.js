@@ -63,6 +63,72 @@ function request(tx, sql, params) {
   return req;
 }
 
+// Bids up to and including roundNumber count. When isFinal, every open item closes
+// as if its countdown ran out. Returns the items that closed.
+async function settleOpenItems(tx, sql, { matchId, roundNumber, isFinal }) {
+  const ids = { matchId: [sql.UniqueIdentifier, matchId], roundNumber: [sql.Int, roundNumber] };
+  const itemRows = await request(tx, sql, ids).query(`
+    SELECT itemId, pointValue, roundsLeft, currentBid, currentBidHolderId
+    FROM item WITH (UPDLOCK)
+    WHERE matchId = @matchId AND status = 'open'`);
+  const bidRows = await request(tx, sql, ids).query(`
+    SELECT b.itemId, b.matchPlayerId, b.amount, b.receivedAt
+    FROM bid b JOIN item i ON i.itemId = b.itemId
+    WHERE i.matchId = @matchId AND i.status = 'open' AND b.roundNumber <= @roundNumber
+    ORDER BY b.receivedAt, b.bidId`);
+
+  const bidsByItem = new Map();
+  for (const bid of bidRows.recordset) {
+    if (!bidsByItem.has(bid.itemId)) bidsByItem.set(bid.itemId, []);
+    bidsByItem.get(bid.itemId).push(bid);
+  }
+
+  const closed = [];
+  for (const item of itemRows.recordset) {
+    const leader = pickLeader(bidsByItem.get(item.itemId) || []);
+    const currentBid = leader ? leader.amount : item.currentBid;
+    const holderId = leader ? leader.holderId : item.currentBidHolderId;
+    const roundsLeft = isFinal ? 0 : Math.max(0, item.roundsLeft - 1);
+    const closes = roundsLeft === 0;
+    const winnerId = closes && currentBid > 0 ? holderId : null;
+
+    await request(tx, sql, {
+      itemId: [sql.UniqueIdentifier, item.itemId],
+      currentBid: [sql.Int, currentBid],
+      holderId: [sql.UniqueIdentifier, holderId],
+      roundsLeft: [sql.Int, roundsLeft],
+      status: [sql.NVarChar(10), closes ? 'closed' : 'open'],
+      winnerId: [sql.UniqueIdentifier, winnerId],
+      closedRound: [sql.Int, closes ? roundNumber : null],
+    }).query(`
+      UPDATE item SET currentBid = @currentBid, currentBidHolderId = @holderId,
+        roundsLeft = @roundsLeft, status = @status,
+        winnerPlayerId = @winnerId, closedRound = @closedRound
+      WHERE itemId = @itemId`);
+
+    if (winnerId) {
+      await request(tx, sql, {
+        matchPlayerId: [sql.UniqueIdentifier, winnerId],
+        points: [sql.Int, item.pointValue],
+      }).query('UPDATE matchPlayer SET score = score + @points WHERE matchPlayerId = @matchPlayerId');
+    }
+    if (closes) closed.push({ itemId: item.itemId, winnerPlayerId: winnerId });
+  }
+  return closed;
+}
+
+// Marks the match finished and saves every player's final score to the leaderboard.
+async function finishMatch(tx, sql, matchId) {
+  await request(tx, sql, { matchId: [sql.UniqueIdentifier, matchId] }).query(`
+    UPDATE [match] SET status = 'finished', finishedAt = SYSUTCDATETIME()
+    WHERE matchId = @matchId;
+    INSERT INTO leaderboardEntry (matchId, matchPlayerId, nickname, score, finishedAt)
+    SELECT p.matchId, p.matchPlayerId, p.nickname, p.score, m.finishedAt
+    FROM matchPlayer p JOIN [match] m ON m.matchId = p.matchId
+    WHERE p.matchId = @matchId
+      AND NOT EXISTS (SELECT 1 FROM leaderboardEntry e WHERE e.matchPlayerId = p.matchPlayerId)`);
+}
+
 async function resolveRound({ matchId, roundNumber }, deps = {}) {
   const {
     sql = db.sql,
@@ -114,66 +180,13 @@ async function resolveRound({ matchId, roundNumber }, deps = {}) {
     const matchEndsAt = new Date(match.endsAt);
     const isFinal = roundEndsAt.getTime() >= matchEndsAt.getTime();
 
-    const itemRows = await request(tx, sql, ids).query(`
-      SELECT itemId, pointValue, roundsLeft, currentBid, currentBidHolderId
-      FROM item WITH (UPDLOCK)
-      WHERE matchId = @matchId AND status = 'open'`);
-    const bidRows = await request(tx, sql, ids).query(`
-      SELECT b.itemId, b.matchPlayerId, b.amount, b.receivedAt
-      FROM bid b JOIN item i ON i.itemId = b.itemId
-      WHERE i.matchId = @matchId AND i.status = 'open' AND b.roundNumber <= @roundNumber
-      ORDER BY b.receivedAt, b.bidId`);
-
-    const bidsByItem = new Map();
-    for (const bid of bidRows.recordset) {
-      if (!bidsByItem.has(bid.itemId)) bidsByItem.set(bid.itemId, []);
-      bidsByItem.get(bid.itemId).push(bid);
-    }
-
-    const closed = [];
-    for (const item of itemRows.recordset) {
-      const leader = pickLeader(bidsByItem.get(item.itemId) || []);
-      const currentBid = leader ? leader.amount : item.currentBid;
-      const holderId = leader ? leader.holderId : item.currentBidHolderId;
-      const roundsLeft = isFinal ? 0 : Math.max(0, item.roundsLeft - 1);
-      const closes = roundsLeft === 0;
-      const winnerId = closes && currentBid > 0 ? holderId : null;
-
-      await request(tx, sql, {
-        itemId: [sql.UniqueIdentifier, item.itemId],
-        currentBid: [sql.Int, currentBid],
-        holderId: [sql.UniqueIdentifier, holderId],
-        roundsLeft: [sql.Int, roundsLeft],
-        status: [sql.NVarChar(10), closes ? 'closed' : 'open'],
-        winnerId: [sql.UniqueIdentifier, winnerId],
-        closedRound: [sql.Int, closes ? roundNumber : null],
-      }).query(`
-        UPDATE item SET currentBid = @currentBid, currentBidHolderId = @holderId,
-          roundsLeft = @roundsLeft, status = @status,
-          winnerPlayerId = @winnerId, closedRound = @closedRound
-        WHERE itemId = @itemId`);
-
-      if (winnerId) {
-        await request(tx, sql, {
-          matchPlayerId: [sql.UniqueIdentifier, winnerId],
-          points: [sql.Int, item.pointValue],
-        }).query('UPDATE matchPlayer SET score = score + @points WHERE matchPlayerId = @matchPlayerId');
-      }
-      if (closes) closed.push({ itemId: item.itemId, winnerPlayerId: winnerId });
-    }
+    const closed = await settleOpenItems(tx, sql, { matchId, roundNumber, isFinal });
 
     await request(tx, sql, { ...ids, income: [sql.Int, match.roundCoinIncome] }).query(
       'UPDATE matchPlayer SET coins = coins + @income WHERE matchId = @matchId');
 
     if (isFinal) {
-      await request(tx, sql, ids).query(`
-        UPDATE [match] SET status = 'finished', finishedAt = SYSUTCDATETIME()
-        WHERE matchId = @matchId;
-        INSERT INTO leaderboardEntry (matchId, matchPlayerId, nickname, score, finishedAt)
-        SELECT p.matchId, p.matchPlayerId, p.nickname, p.score, m.finishedAt
-        FROM matchPlayer p JOIN [match] m ON m.matchId = p.matchId
-        WHERE p.matchId = @matchId
-          AND NOT EXISTS (SELECT 1 FROM leaderboardEntry e WHERE e.matchPlayerId = p.matchPlayerId)`);
+      await finishMatch(tx, sql, matchId);
     } else {
       // The last round is cut short so it ends exactly when the match does.
       const nextEndsAt = new Date(Math.min(roundEndsAt.getTime() + ROUND_MS, matchEndsAt.getTime()));
@@ -247,6 +260,8 @@ module.exports = {
   generatePointValue,
   generateLifetimeRounds,
   pickLeader,
+  settleOpenItems,
+  finishMatch,
   resolveRound,
   startWorker,
 };
