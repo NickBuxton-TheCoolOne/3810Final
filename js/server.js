@@ -53,6 +53,7 @@ async function buildApp({ dbModule = db, queueModule = queue } = {}) {
   // 3. Auth: per-route preHandlers live in js/api/authHooks.js (authenticate,
   //    requireRole, requirePlayerInMatch). 4. Route plugins from js/api/.
   await app.register(require('./api/auth'));
+  await app.register(require('./api/admin'));
   await app.register(require('./api/leaderboard'));
   await app.register(require('./api/matches'));
 
